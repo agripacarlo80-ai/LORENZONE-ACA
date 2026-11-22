@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@layer base {
+  :root,
+  [data-theme='white'] {
+    --font-display: 'Outfit', system-ui, sans-serif;
+    --font-sans: 'DM Sans', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --lz-bg: #F8FAF9;
+    --lz-surface: #FFFFFF;
+    --lz-surface-alt: #F3F6F4;
+    --lz-border: #DCE5DF;
+    --lz-header-bg: #FFFFFF;
+    --lz-header-border: #DCE5DF;
+    --lz-header-brand-left: #1E5B3A;
+    --lz-header-brand-right: #EA7A26;
+    --lz-header-nav: #4D6354;
+    --lz-header-nav-active: #1E5B3A;
+    --lz-header-cta-bg: #EA7A26;
+    --lz-header-cta-hover: #D46818;
+    --lz-footer-bg: #FFFFFF;
+  }
+
+  [data-theme='green'] {
+    --lz-bg: #ECF5EF;
+    --lz-surface: #FFFFFF;
+    --lz-surface-alt: #E3F0E7;
+    --lz-border: #C3DBC9;
+    --lz-header-bg: #1E5B3A;
+    --lz-header-border: #17462C;
+    --lz-header-brand-left: #FFFFFF;
+    --lz-header-brand-right: #FFAD60;
+    --lz-header-nav: #D8EDE0;
+    --lz-header-nav-active: #FFFFFF;
+    --lz-header-cta-bg: #EA7A26;
+    --lz-header-cta-hover: #D46818;
+    --lz-footer-bg: #FFFFFF;
+  }
+
+  [data-theme='orange'] {
+    --lz-bg: #FFF7F0;
+    --lz-surface: #FFFFFF;
+    --lz-surface-alt: #FFEDE0;
+    --lz-border: #F5D5BC;
+    --lz-header-bg: #D96412;
+    --lz-header-border: #C05409;
+    --lz-header-brand-left: #FFFFFF;
+    --lz-header-brand-right: #E6F7ED;
+    --lz-header-nav: #FFEDD8;
+    --lz-header-nav-active: #FFFFFF;
+    --lz-header-cta-bg: #1E5B3A;
+    --lz-header-cta-hover: #17462C;
+    --lz-footer-bg: #FFFFFF;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--lz-bg);
+    color: #172A1E;
+    transition: background-color 180ms ease;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+}
+
+@keyframes floatGentle {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes duckSwim {
+  0%, 100% {
+    transform: translateY(0px) rotate(-1.5deg);
+  }
+  50% {
+    transform: translateY(-5px) rotate(1.5deg);
+  }
+}
+
+@keyframes runnerHop {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-float-gentle {
+  animation: floatGentle 3.2s ease-in-out infinite;
+}
+
+.animate-duck-swim {
+  animation: duckSwim 2.6s ease-in-out infinite;
+}
+
+.animate-runner-hop {
+  animation: runnerHop 0.45s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-float-gentle,
+  .animate-duck-swim,
+  .animate-runner-hop {
+    animation: none;
+  }
+}

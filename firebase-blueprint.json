@@ -1,0 +1,257 @@
+{
+  "entities": {
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Public classroom identity, pet companion state, uniform customization, and quiz scores (no PII).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "role": { "type": "string", "enum": ["student", "teacher", "admin"] },
+        "petSpecies": { "type": "string", "enum": ["cat", "dog", "bunny", "turtle", "hamster", "penguin"] },
+        "petName": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "petLevel": { "type": "integer" },
+        "petXp": { "type": "integer" },
+        "coins": { "type": "integer" },
+        "outfit": { "type": "string", "maxLength": 40 },
+        "accessory": { "type": "string", "maxLength": 40 },
+        "petColor": { "type": "string", "maxLength": 30 },
+        "uniformStyle": { "type": "string", "maxLength": 40 },
+        "unlockedItems": { "type": "array", "description": "Bounded list of unlocked cosmetic/furniture item IDs (max 40)." },
+        "hunger": { "type": "integer" },
+        "happiness": { "type": "integer" },
+        "energy": { "type": "integer" },
+        "cleanliness": { "type": "integer" },
+        "totalScore": { "type": "integer" },
+        "gamesPlayed": { "type": "integer" },
+        "correctAnswers": { "type": "integer" },
+        "totalAnswers": { "type": "integer" },
+        "isSleeping": { "type": "boolean" },
+        "lockedOut": { "type": "boolean" },
+        "lockReason": { "type": "string", "maxLength": 140 },
+        "activeGame": { "type": "string", "maxLength": 60 },
+        "photoUrl": { "type": "string", "maxLength": 40000, "description": "Optional compressed student/faculty profile photo data URL or Google avatar URL." },
+        "isOnline": { "type": "boolean", "description": "Live session online flag updated on login, heartbeat, and sign out." },
+        "lastSeenAt": { "type": "string", "format": "date-time", "description": "Server timestamp of the user's most recent active classroom heartbeat." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "role",
+        "petSpecies",
+        "petName",
+        "petLevel",
+        "petXp",
+        "coins",
+        "outfit",
+        "accessory",
+        "petColor",
+        "uniformStyle",
+        "unlockedItems",
+        "hunger",
+        "happiness",
+        "energy",
+        "cleanliness",
+        "totalScore",
+        "gamesPlayed",
+        "correctAnswers",
+        "totalAnswers",
+        "isSleeping",
+        "lockedOut",
+        "lockReason",
+        "activeGame",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII record containing user Gmail address and section.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 120 },
+        "section": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "section", "createdAt", "updatedAt"]
+    },
+    "QuizDeck": {
+      "title": "QuizDeck",
+      "description": "Customizable subject quiz deck created manually or imported from a PPTX file.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "description": { "type": "string", "maxLength": 240 },
+        "sourceType": { "type": "string", "enum": ["custom", "pptx"] },
+        "teacherId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teacherName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "questions": { "type": "array", "description": "Bounded array of up to 50 question objects." },
+        "isPublished": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "title",
+        "subject",
+        "description",
+        "sourceType",
+        "teacherId",
+        "teacherName",
+        "questions",
+        "isPublished",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ScoreRecord": {
+      "title": "ScoreRecord",
+      "description": "Recorded mini-game attempt score for leaderboard and teacher monitoring.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "petName": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "petSpecies": { "type": "string", "maxLength": 20 },
+        "gameId": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "gameTitle": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "deckId": { "type": "string", "maxLength": 80 },
+        "score": { "type": "integer" },
+        "correctCount": { "type": "integer" },
+        "totalCount": { "type": "integer" },
+        "durationSeconds": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "studentId",
+        "studentName",
+        "petName",
+        "petSpecies",
+        "gameId",
+        "gameTitle",
+        "subject",
+        "deckId",
+        "score",
+        "correctCount",
+        "totalCount",
+        "durationSeconds",
+        "createdAt"
+      ]
+    },
+    "AntiCheatAlert": {
+      "title": "AntiCheatAlert",
+      "description": "Real-time tab-switch or app-exit alert locking a student until a teacher allows them.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "petName": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "gameId": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "gameTitle": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "status": { "type": "string", "enum": ["locked", "allowed"] },
+        "resolvedBy": { "type": "string", "maxLength": 60 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "studentId",
+        "studentName",
+        "petName",
+        "gameId",
+        "gameTitle",
+        "subject",
+        "reason",
+        "status",
+        "resolvedBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AuthorizedFaculty": {
+      "title": "AuthorizedFaculty",
+      "description": "Admin-managed allowlist of verified Gmail addresses permitted to access Teacher or Admin roles.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["teacher", "admin"] },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "addedBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "fullName", "addedBy", "createdAt", "updatedAt"]
+    },
+    "AccessCodesConfig": {
+      "title": "AccessCodesConfig",
+      "description": "Admin-managed secret access codes required for multi-user Teacher and Admin login.",
+      "type": "object",
+      "properties": {
+        "teacherCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "adminCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "updatedBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teacherCode", "adminCode", "updatedBy", "updatedAt"]
+    },
+    "RoleClaim": {
+      "title": "RoleClaim",
+      "description": "Verified secret-code claim unlocking Teacher or Admin role for an authenticated user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "targetRole": { "type": "string", "enum": ["teacher", "admin"] },
+        "accessCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "targetRole", "accessCode", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/publicProfiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Public classroom profile, pet companion stats, and scores for leaderboard and teacher monitor."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Strictly isolated PII (email, section) accessible only by the account owner or teachers/admins."
+    },
+    "/quizDecks/{deckId}": {
+      "schema": { "$ref": "#/entities/QuizDeck" },
+      "description": "Customizable subject quiz decks created by teachers or imported from PPTX."
+    },
+    "/scoreRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/ScoreRecord" },
+      "description": "Immutable student score records for downloadable leaderboard and teacher reporting."
+    },
+    "/antiCheatAlerts/{alertId}": {
+      "schema": { "$ref": "#/entities/AntiCheatAlert" },
+      "description": "Real-time anti-cheat alerts triggered when a student leaves an active quiz."
+    },
+    "/authorizedFaculty/{facultyEmail}": {
+      "schema": { "$ref": "#/entities/AuthorizedFaculty" },
+      "description": "Admin-only allowlist authorizing specific Gmail accounts as Teacher or Admin."
+    },
+    "/config/{configId}": {
+      "schema": { "$ref": "#/entities/AccessCodesConfig" },
+      "description": "Admin-managed secret codes for Teacher and Admin verification."
+    },
+    "/roleClaims/{userId}": {
+      "schema": { "$ref": "#/entities/RoleClaim" },
+      "description": "User-submitted secret code verification record checked by Firestore rules."
+    }
+  }
+}

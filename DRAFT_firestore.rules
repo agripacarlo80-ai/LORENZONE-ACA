@@ -1,0 +1,345 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'maxsison2@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isTeacher() {
+      return isAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role == 'teacher'
+      );
+    }
+
+    // --- Validation Blueprints ---
+    function isValidPublicProfile(data) {
+      return data.keys().hasAll([
+        'uid', 'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp',
+        'coins', 'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
+        'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore', 'gamesPlayed',
+        'correctAnswers', 'totalAnswers', 'isSleeping', 'lockedOut', 'lockReason',
+        'activeGame', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid', 'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp',
+        'coins', 'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
+        'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore', 'gamesPlayed',
+        'correctAnswers', 'totalAnswers', 'isSleeping', 'lockedOut', 'lockReason',
+        'activeGame', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
+      && data.role in ['student', 'teacher']
+      && data.petSpecies in ['cat', 'dog', 'bunny', 'turtle', 'hamster', 'penguin']
+      && data.petName is string && data.petName.size() >= 1 && data.petName.size() <= 30
+      && data.petLevel is int && data.petLevel >= 1 && data.petLevel <= 999
+      && data.petXp is int && data.petXp >= 0 && data.petXp <= 1000000
+      && data.coins is int && data.coins >= 0 && data.coins <= 1000000
+      && data.outfit is string && data.outfit.size() >= 1 && data.outfit.size() <= 40
+      && data.accessory is string && data.accessory.size() >= 1 && data.accessory.size() <= 40
+      && data.petColor is string && data.petColor.size() >= 1 && data.petColor.size() <= 30
+      && data.uniformStyle is string && data.uniformStyle.size() >= 1 && data.uniformStyle.size() <= 40
+      && data.unlockedItems is list && data.unlockedItems.size() <= 40
+      && (data.unlockedItems.size() == 0 || data.unlockedItems[0] is string)
+      && data.hunger is int && data.hunger >= 0 && data.hunger <= 100
+      && data.happiness is int && data.happiness >= 0 && data.happiness <= 100
+      && data.energy is int && data.energy >= 0 && data.energy <= 100
+      && data.cleanliness is int && data.cleanliness >= 0 && data.cleanliness <= 100
+      && data.totalScore is int && data.totalScore >= 0 && data.totalScore <= 10000000
+      && data.gamesPlayed is int && data.gamesPlayed >= 0 && data.gamesPlayed <= 100000
+      && data.correctAnswers is int && data.correctAnswers >= 0 && data.correctAnswers <= 1000000
+      && data.totalAnswers is int && data.totalAnswers >= 0 && data.totalAnswers <= 1000000
+      && data.isSleeping is bool
+      && data.lockedOut is bool
+      && data.lockReason is string && data.lockReason.size() <= 140
+      && data.activeGame is string && data.activeGame.size() <= 60
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateInfo(data) {
+      return data.keys().hasAll(['uid', 'email', 'section', 'createdAt', 'updatedAt'])
+      && data.keys().hasOnly(['uid', 'email', 'section', 'createdAt', 'updatedAt'])
+      && isValidId(data.uid)
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+      && data.section is string && data.section.size() <= 40
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidQuizDeck(data) {
+      return data.keys().hasAll([
+        'id', 'title', 'subject', 'description', 'sourceType',
+        'teacherId', 'teacherName', 'questions', 'isPublished', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'title', 'subject', 'description', 'sourceType',
+        'teacherId', 'teacherName', 'questions', 'isPublished', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.id)
+      && data.title is string && data.title.size() >= 1 && data.title.size() <= 100
+      && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 50
+      && data.description is string && data.description.size() <= 240
+      && data.sourceType in ['custom', 'pptx']
+      && isValidId(data.teacherId)
+      && data.teacherName is string && data.teacherName.size() >= 1 && data.teacherName.size() <= 60
+      && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 50
+      && data.questions[0] is map
+      && data.isPublished is bool
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidScoreRecord(data) {
+      return data.keys().hasAll([
+        'id', 'studentId', 'studentName', 'petName', 'petSpecies',
+        'gameId', 'gameTitle', 'subject', 'deckId', 'score',
+        'correctCount', 'totalCount', 'durationSeconds', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'studentId', 'studentName', 'petName', 'petSpecies',
+        'gameId', 'gameTitle', 'subject', 'deckId', 'score',
+        'correctCount', 'totalCount', 'durationSeconds', 'createdAt'
+      ])
+      && isValidId(data.id)
+      && isValidId(data.studentId)
+      && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 60
+      && data.petName is string && data.petName.size() >= 1 && data.petName.size() <= 30
+      && data.petSpecies is string && data.petSpecies.size() >= 1 && data.petSpecies.size() <= 20
+      && data.gameId is string && data.gameId.size() >= 1 && data.gameId.size() <= 40
+      && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 60
+      && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 50
+      && data.deckId is string && data.deckId.size() >= 1 && data.deckId.size() <= 80
+      && data.score is int && data.score >= 0 && data.score <= 100000
+      && data.correctCount is int && data.correctCount >= 0 && data.correctCount <= 500
+      && data.totalCount is int && data.totalCount >= 0 && data.totalCount <= 500
+      && data.durationSeconds is int && data.durationSeconds >= 0 && data.durationSeconds <= 7200
+      && data.createdAt is timestamp;
+    }
+
+    function isValidScoreCounts(data) {
+      return data.correctCount >= 0 && data.correctCount <= 500;
+    }
+
+    function isValidAntiCheatAlert(data) {
+      return data.keys().hasAll([
+        'id', 'studentId', 'studentName', 'petName', 'gameId', 'gameTitle',
+        'subject', 'reason', 'status', 'resolvedBy', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'studentId', 'studentName', 'petName', 'gameId', 'gameTitle',
+        'subject', 'reason', 'status', 'resolvedBy', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.id)
+      && isValidId(data.studentId)
+      && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 60
+      && data.petName is string && data.petName.size() >= 1 && data.petName.size() <= 30
+      && data.gameId is string && data.gameId.size() >= 1 && data.gameId.size() <= 40
+      && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 60
+      && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 50
+      && data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 140
+      && data.status in ['locked', 'allowed']
+      && data.resolvedBy is string && data.resolvedBy.size() <= 60
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+    match /test/connection {
+      allow get: if true;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isOwner(adminId) || isAdmin();
+      allow list, create, update, delete: if false;
+    }
+
+    match /publicProfiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && resource.data.role in ['student', 'teacher'];
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidPublicProfile(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().lockedOut == false
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidPublicProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          // Action: Teacher unlocks a locked student
+          (
+            isTeacher() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lockedOut', 'lockReason', 'updatedAt']) &&
+            incoming().lockedOut == false
+          ) ||
+          // Action: Teacher awards recitation points (e.g., Catch the Duck / On the Run)
+          (
+            isTeacher() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['totalScore', 'coins', 'petXp', 'petLevel', 'updatedAt'])
+          ) ||
+          // Action: Owner updates pet care, customization, game progress, or triggers anti-cheat self-lock
+          // CRITICAL: Owner CANNOT unlock themselves if lockedOut is already true!
+          (
+            isOwner(userId) &&
+            incoming().role == existing().role &&
+            (existing().lockedOut == false || incoming().lockedOut == true) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
+              'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
+              'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
+              'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
+              'lockedOut', 'lockReason', 'activeGame', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    match /users/{userId}/private/{docId} {
+      allow get: if isValidId(userId) && isValidId(docId) && (isOwner(userId) || isTeacher());
+      allow list: if isOwner(userId) && resource.data.uid == request.auth.uid;
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(docId)
+        && isValidPrivateInfo(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(docId)
+        && isValidPrivateInfo(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'section', 'updatedAt']);
+
+      allow delete: if isAdmin() && isValidId(userId) && isValidId(docId);
+    }
+
+    match /quizDecks/{deckId} {
+      allow get: if isSignedIn() && isValidId(deckId) && (existing().isPublished == true || existing().teacherId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.isPublished == true || resource.data.teacherId == request.auth.uid);
+
+      allow create: if isTeacher()
+        && isValidId(deckId)
+        && isValidQuizDeck(incoming())
+        && incoming().id == deckId
+        && incoming().teacherId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(deckId)
+        && isValidQuizDeck(incoming())
+        && incoming().id == existing().id
+        && incoming().teacherId == existing().teacherId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            isTeacher() &&
+            existing().teacherId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'subject', 'description', 'sourceType', 'questions', 'isPublished', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSignedIn() && isValidId(deckId) && (isAdmin() || (isTeacher() && existing().teacherId == request.auth.uid));
+    }
+
+    match /scoreRecords/{recordId} {
+      allow get: if isSignedIn() && isValidId(recordId);
+      allow list: if isSignedIn() && resource.data.score >= 0;
+
+      allow create: if isSignedIn()
+        && isValidId(recordId)
+        && isValidScoreRecord(incoming())
+        && incoming().id == recordId
+        && (incoming().studentId == request.auth.uid || isTeacher())
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+
+    match /antiCheatAlerts/{alertId} {
+      allow get: if isSignedIn() && isValidId(alertId);
+      allow list: if isSignedIn() && resource.data.status in ['locked', 'allowed'];
+
+      allow create: if isSignedIn()
+        && isValidId(alertId)
+        && isValidAntiCheatAlert(incoming())
+        && incoming().id == alertId
+        && incoming().studentId == request.auth.uid
+        && incoming().status == 'locked'
+        && incoming().resolvedBy == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(alertId)
+        && isValidAntiCheatAlert(incoming())
+        && incoming().id == existing().id
+        && incoming().studentId == existing().studentId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && existing().status == 'locked'
+        && (
+          isAdmin() ||
+          (
+            isTeacher() &&
+            incoming().status == 'allowed' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolvedBy', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(alertId);
+    }
+  }
+}

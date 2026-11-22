@@ -1,0 +1,98 @@
+/**
+ * Security Rules Verification Suite (Dirty Dozen Adversarial Payloads)
+ * Documents expected PERMISSION_DENIED outcomes for Lorenzone Firestore rules.
+ */
+export const dirtyDozenPayloads = [
+  {
+    name: '1. Unauthenticated Profile Read',
+    auth: null,
+    operation: 'get',
+    path: '/publicProfiles/student_1',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '2. Student Self-Unlock Bypass',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'update',
+    path: '/publicProfiles/student_1',
+    existingData: { lockedOut: true },
+    payload: { lockedOut: false },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '3. Cross-Student PII Snooping',
+    auth: { uid: 'student_2', token: { email_verified: true } },
+    operation: 'get',
+    path: '/users/student_1/private/info',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '4. Shadow Field Injection on PublicProfile',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'create',
+    path: '/publicProfiles/student_1',
+    payload: { uid: 'student_1', isAdmin: true },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '5. Identity Spoofing on ScoreRecord',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'create',
+    path: '/scoreRecords/rec_1',
+    payload: { id: 'rec_1', studentId: 'student_2', score: 9999 },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '6. Student Creating QuizDeck',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'create',
+    path: '/quizDecks/deck_1',
+    payload: { id: 'deck_1', teacherId: 'student_1' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '7. ID Poisoning (>128 chars)',
+    auth: { uid: 'teacher_1', token: { email_verified: true } },
+    operation: 'create',
+    path: `/quizDecks/${'a'.repeat(160)}`,
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '8. Client-Backdated Timestamp',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'create',
+    path: '/scoreRecords/rec_2',
+    payload: { createdAt: '2020-01-01T00:00:00Z' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '9. Immutable ScoreRecord Tampering',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'update',
+    path: '/scoreRecords/rec_1',
+    payload: { score: 10000 },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '10. Student Resolving Own AntiCheat Alert',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'update',
+    path: '/antiCheatAlerts/alert_1',
+    payload: { status: 'allowed', resolvedBy: 'student_1' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '11. Unverified Email Bypass',
+    auth: { uid: 'student_3', token: { email_verified: false } },
+    operation: 'create',
+    path: '/publicProfiles/student_3',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '12. Cross-Teacher Deck Deletion',
+    auth: { uid: 'teacher_2', token: { email_verified: true } },
+    operation: 'delete',
+    path: '/quizDecks/deck_owned_by_teacher_1',
+    expected: 'PERMISSION_DENIED',
+  },
+];

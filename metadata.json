@@ -1,0 +1,6 @@
+{
+  "name": "LORENZONE",
+  "description": "San Lorenzo Academy gamified pet-care and customizable interactive quiz platform with real-time anti-cheat monitoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
