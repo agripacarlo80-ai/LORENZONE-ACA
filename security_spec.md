@@ -7,6 +7,7 @@
 4. **Strict Field Allowlisting**: Every collection enforces exact `keys().hasAll(...)` and `keys().hasOnly(...)` on create, plus action-scoped `affectedKeys().hasOnly(...)` on update to block shadow field injection.
 5. **Verified Google Sign-In**: All read/write operations require `request.auth != null && request.auth.token.email_verified == true`.
 6. **Teacher vs. Admin Role Isolation**: Existing `teacher` accounts cannot claim or be promoted to `admin`; `config/accessCodes` maintains separate Teacher and Admin secret codes.
+7. **Admin-Only Reset & Deletion**: Only verified Admins (`isAdmin()`) may delete `scoreRecords`, `antiCheatAlerts`, `quizDecks`, `publicProfiles`, `users/{uid}/private/info`, and `roleClaims`; students and teachers cannot alter or delete score records.
 
 ## 2. Dirty Dozen Attack Payloads (Expected: PERMISSION_DENIED)
 1. **Unauthenticated Profile Read**: Read `/publicProfiles/u1` without `request.auth`.

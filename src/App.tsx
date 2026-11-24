@@ -6,12 +6,14 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   auth,
@@ -450,7 +452,7 @@ function LorenzoneApp() {
       isSleeping: false,
       lockedOut: false,
       lockReason: '',
-      activeGame: 'Lobby',
+      activeGame: 'Pet Home Room',
       section: data.section,
       photoUrl: data.photoUrl || '',
       isOnline: true,
@@ -487,6 +489,56 @@ function LorenzoneApp() {
     },
     [user]
   );
+
+  const myProfileRef = useRef<PublicProfile | null>(null);
+  myProfileRef.current = myProfile;
+
+  const reportActivity = useCallback(
+    async (activity: string) => {
+      const current = myProfileRef.current;
+      if (!user || !current || current.lockedOut) return;
+      const clean = activity.trim().slice(0, 60) || 'Lobby';
+      if (current.activeGame === clean) return;
+      try {
+        await updateDoc(doc(db, 'publicProfiles', user.uid), {
+          activeGame: clean,
+          isOnline: true,
+          lastSeenAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Non-blocking activity indicator update
+      }
+    },
+    [user]
+  );
+
+  useEffect(() => {
+    if (!myProfile?.uid || myProfile.lockedOut) return;
+    if (activeTab === 'home') {
+      void reportActivity('Pet Home Room');
+    } else if (activeTab === 'games') {
+      if (!launchGameId) {
+        void reportActivity('Browsing Quiz Games');
+      }
+    } else if (activeTab === 'leaderboard') {
+      void reportActivity('Viewing Leaderboard');
+    } else if (activeTab === 'monitor') {
+      if (myProfile.role === 'admin') {
+        void reportActivity('Admin Control Center');
+      } else {
+        void reportActivity(`Monitoring: ${myProfile.section || 'Classroom'}`);
+      }
+    }
+  }, [
+    activeTab,
+    launchGameId,
+    myProfile?.uid,
+    myProfile?.role,
+    myProfile?.section,
+    myProfile?.lockedOut,
+    reportActivity,
+  ]);
 
   const handleTriggerCheatLock = useCallback(
     async (gameId: string, gameTitle: string, subject: string, reason: string) => {
@@ -823,6 +875,151 @@ function LorenzoneApp() {
     return Array.from(byId.values());
   }, [ownDecks, publishedDecks]);
 
+  const handleAdminResetApp = useCallback(
+    async (options: {
+      mode: 'scores_only' | 'full_wipe';
+      includeCustomDecks: boolean;
+      includeFacultyAllowlist: boolean;
+      resetSelfProfile: boolean;
+    }): Promise<{
+      deletedScores: number;
+      deletedAlerts: number;
+      deletedDecks: number;
+      affectedProfiles: number;
+    }> => {
+      if (!user || myProfile?.role !== 'admin') {
+        throw new Error('Only an Administrator can reset web app data.');
+      }
+
+      const commitBatchOps = async (ops: Array<(batch: ReturnType<typeof writeBatch>) => void>) => {
+        for (let i = 0; i < ops.length; i += 400) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 400).forEach((fn) => fn(batch));
+          await batch.commit();
+        }
+      };
+
+      const [scoresSnap, alertsSnap, profilesSnap] = await Promise.all([
+        getDocs(query(collection(db, 'scoreRecords'), where('score', '>=', 0))),
+        getDocs(query(collection(db, 'antiCheatAlerts'), where('status', 'in', ['locked', 'allowed']))),
+        getDocs(query(collection(db, 'publicProfiles'), where('role', 'in', ['student', 'teacher', 'admin']))),
+      ]);
+
+      const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+
+      scoresSnap.docs.forEach((d) => {
+        ops.push((batch) => batch.delete(d.ref));
+      });
+      alertsSnap.docs.forEach((d) => {
+        ops.push((batch) => batch.delete(d.ref));
+      });
+
+      let deletedDecks = 0;
+      if (options.includeCustomDecks) {
+        deletedDecks = customDecks.length;
+        customDecks.forEach((deck) => {
+          ops.push((batch) => batch.delete(doc(db, 'quizDecks', deck.id)));
+        });
+      }
+
+      let affectedProfiles = 0;
+      if (options.mode === 'scores_only') {
+        profilesSnap.docs.forEach((pDoc) => {
+          affectedProfiles += 1;
+          ops.push((batch) =>
+            batch.update(pDoc.ref, {
+              petLevel: 1,
+              petXp: 0,
+              coins: 120,
+              hunger: 85,
+              happiness: 90,
+              energy: 90,
+              cleanliness: 95,
+              totalScore: 0,
+              gamesPlayed: 0,
+              correctAnswers: 0,
+              totalAnswers: 0,
+              isSleeping: false,
+              lockedOut: false,
+              lockReason: '',
+              activeGame: pDoc.id === user.uid ? 'Admin & Secret Codes' : 'Pet Home Room',
+              updatedAt: serverTimestamp(),
+            })
+          );
+        });
+        await commitBatchOps(ops);
+      } else {
+        if (options.includeFacultyAllowlist) {
+          const facultySnap = await getDocs(
+            query(collection(db, 'authorizedFaculty'), where('role', 'in', ['teacher', 'admin']))
+          );
+          facultySnap.docs.forEach((fDoc) => {
+            ops.push((batch) => batch.delete(fDoc.ref));
+          });
+        }
+
+        profilesSnap.docs.forEach((pDoc) => {
+          if (pDoc.id === user.uid) return;
+          affectedProfiles += 1;
+          ops.push((batch) => batch.delete(pDoc.ref));
+          ops.push((batch) => batch.delete(doc(db, 'users', pDoc.id, 'private', 'info')));
+          ops.push((batch) => batch.delete(doc(db, 'roleClaims', pDoc.id)));
+        });
+
+        if (options.resetSelfProfile) {
+          affectedProfiles += 1;
+          ops.push((batch) => batch.delete(doc(db, 'publicProfiles', user.uid)));
+          ops.push((batch) => batch.delete(doc(db, 'users', user.uid, 'private', 'info')));
+        } else {
+          ops.push((batch) =>
+            batch.update(doc(db, 'publicProfiles', user.uid), {
+              petLevel: 1,
+              petXp: 0,
+              coins: 120,
+              hunger: 85,
+              happiness: 90,
+              energy: 90,
+              cleanliness: 95,
+              totalScore: 0,
+              gamesPlayed: 0,
+              correctAnswers: 0,
+              totalAnswers: 0,
+              isSleeping: false,
+              lockedOut: false,
+              lockReason: '',
+              activeGame: 'Admin & Secret Codes',
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+
+        await commitBatchOps(ops);
+
+        if (options.resetSelfProfile) {
+          try {
+            await deleteDoc(doc(db, 'roleClaims', user.uid));
+          } catch {
+            // Optional if admin used primary/allowlist auth
+          }
+          try {
+            localStorage.removeItem('lorenzone_theme');
+          } catch {
+            // Ignore storage errors
+          }
+          setActiveTab('home');
+        }
+      }
+
+      return {
+        deletedScores: scoresSnap.size,
+        deletedAlerts: alertsSnap.size,
+        deletedDecks,
+        affectedProfiles,
+      };
+    },
+    [user, myProfile?.role, customDecks]
+  );
+
   const allDecks = useMemo(
     () => [...customDecks.filter((d) => d.isPublished), ...BUILTIN_DECKS],
     [customDecks]
@@ -1065,6 +1262,7 @@ function LorenzoneApp() {
             records={scoreRecords}
             onUpdateProfile={handleUpdateProfile}
             onOpenGames={() => setActiveTab('games')}
+            onSetActivity={(act) => void reportActivity(act)}
           />
         )}
 
@@ -1078,7 +1276,7 @@ function LorenzoneApp() {
             onTriggerCheatLock={handleTriggerCheatLock}
             onRecordGameResult={handleRecordGameResult}
             onAwardStudent={handleAwardStudent}
-            onSetActiveGame={(activeGame) => handleUpdateProfile({ activeGame })}
+            onSetActiveGame={(activeGame) => reportActivity(activeGame)}
           />
         )}
 
@@ -1116,6 +1314,8 @@ function LorenzoneApp() {
             onAssignStudentSection={handleAssignStudentSection}
             accessCodes={accessCodes}
             onUpdateAccessCodes={handleUpdateAccessCodes}
+            onSetActivity={(act) => void reportActivity(act)}
+            onAdminResetApp={handleAdminResetApp}
           />
         )}
       </main>

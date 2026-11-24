@@ -104,4 +104,11 @@ export const dirtyDozenPayloads = [
     payload: { role: 'admin' },
     expected: 'PERMISSION_DENIED',
   },
+  {
+    name: '14. Student Deleting ScoreRecord Blocked',
+    auth: { uid: 'student_1', token: { email_verified: true } },
+    operation: 'delete',
+    path: '/scoreRecords/rec_1',
+    expected: 'PERMISSION_DENIED',
+  },
 ];

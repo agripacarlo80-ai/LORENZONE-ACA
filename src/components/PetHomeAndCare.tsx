@@ -25,15 +25,24 @@ interface PetHomeAndCareProps {
   records: ScoreRecord[];
   onUpdateProfile: (patch: Partial<PublicProfile>) => Promise<void>;
   onOpenGames: () => void;
+  onSetActivity?: (activity: string) => void;
 }
 
 type HomeSubView = 'room' | 'shop' | 'customize' | 'history';
+
+const SUB_VIEW_ACTIVITY: Record<HomeSubView, string> = {
+  room: 'Pet Home Room',
+  shop: 'Browsing SLA Shop',
+  customize: 'Customizing Pet & Profile',
+  history: 'Viewing Game History',
+};
 
 export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
   profile,
   records,
   onUpdateProfile,
   onOpenGames,
+  onSetActivity,
 }) => {
   const [subView, setSubView] = useState<HomeSubView>('room');
   const [shopCategory, setShopCategory] = useState<'clothes' | 'accessories' | 'furniture'>('clothes');
@@ -127,6 +136,7 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
         isSleeping,
         petXp,
         petLevel,
+        ...(profile.lockedOut ? {} : { activeGame: 'Caring for Pet' }),
       });
     } finally {
       setActionBusy(false);
@@ -226,7 +236,9 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
               type="button"
               onClick={() => {
                 soundFx.playClick();
-                setSubView(tab.id as HomeSubView);
+                const nextView = tab.id as HomeSubView;
+                setSubView(nextView);
+                onSetActivity?.(SUB_VIEW_ACTIVITY[nextView]);
               }}
               className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 subView === tab.id

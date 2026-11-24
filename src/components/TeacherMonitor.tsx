@@ -1,22 +1,28 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Activity,
   AlertOctagon,
+  BookOpen,
   CheckCircle2,
+  Clock,
   Download,
   Edit3,
   Eye,
   EyeOff,
   FileUp,
+  GraduationCap,
   Plus,
   ShieldCheck,
   Trash2,
   UploadCloud,
   UserPlus,
+  Users,
   Volume2,
   Play,
   KeyRound,
   Copy,
   School,
+  RotateCcw,
 } from 'lucide-react';
 import {
   AntiCheatAlert,
@@ -26,11 +32,10 @@ import {
   QuizDeck,
   QuizQuestion,
   ScoreRecord,
-  UserRole,
 } from '../types';
 import { SLA_SECTIONS } from '../data/defaultDecks';
 import { downloadLeaderboardCsv, parsePlainTextSlides, parsePptxFile } from '../lib/pptxParser';
-import { getStudentPresence } from '../lib/presence';
+import { formatLastSeen, getStudentPresence, timestampToMillis } from '../lib/presence';
 import { soundFx } from '../lib/sound';
 import { PetAvatar } from './PetAvatar';
 
@@ -56,9 +61,53 @@ interface TeacherMonitorProps {
   onAssignStudentSection: (studentUid: string, section: string) => Promise<void>;
   accessCodes: { teacherCode: string; adminCode: string };
   onUpdateAccessCodes: (teacherCode: string, adminCode: string) => Promise<void>;
+  onSetActivity?: (activity: string) => void;
+  onAdminResetApp?: (options: {
+    mode: 'scores_only' | 'full_wipe';
+    includeCustomDecks: boolean;
+    includeFacultyAllowlist: boolean;
+    resetSelfProfile: boolean;
+  }) => Promise<{
+    deletedScores: number;
+    deletedAlerts: number;
+    deletedDecks: number;
+    affectedProfiles: number;
+  }>;
 }
 
 type MonitorTab = 'live' | 'builder' | 'pptx' | 'admin';
+
+function getActivityBadge(profile: PublicProfile, isOnline: boolean) {
+  if (profile.lockedOut) {
+    return {
+      label: `Locked: ${profile.activeGame || 'Quiz'}`,
+      className: 'bg-red-50 text-red-700 border-red-200',
+    };
+  }
+  if (!isOnline) {
+    return {
+      label: 'Signed Out',
+      className: 'bg-stone-100 text-[#4D6354] border-[#E5DEC9]',
+    };
+  }
+  const activity = (profile.activeGame || 'Lobby').trim();
+  if (/^(Playing|Hosting):/i.test(activity)) {
+    return {
+      label: activity,
+      className: 'bg-[#EA7A26]/15 text-[#C65B10] border-[#EA7A26]/30',
+    };
+  }
+  if (/^(Monitoring|Building|Importing|Admin)/i.test(activity)) {
+    return {
+      label: activity,
+      className: 'bg-emerald-50 text-[#1E5B3A] border-emerald-200',
+    };
+  }
+  return {
+    label: activity,
+    className: 'bg-[#FAF8F2] text-[#172A1E] border-[#E5DEC9]',
+  };
+}
 
 export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   teacherProfile,
@@ -79,6 +128,8 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   onAssignStudentSection,
   accessCodes,
   onUpdateAccessCodes,
+  onSetActivity,
+  onAdminResetApp,
 }) => {
   const [tab, setTab] = useState<MonitorTab>('live');
 
@@ -131,6 +182,15 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [presenceFilter, setPresenceFilter] = useState<'all' | 'online' | 'offline'>('all');
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // Admin App Reset state
+  const [resetMode, setResetMode] = useState<'scores_only' | 'full_wipe'>('scores_only');
+  const [resetDecks, setResetDecks] = useState(false);
+  const [resetAllowlist, setResetAllowlist] = useState(false);
+  const [resetSelf, setResetSelf] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetFeedback, setResetFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
     return () => window.clearInterval(timer);
@@ -150,6 +210,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const isAdmin = teacherProfile.role === 'admin';
   const myTeachingSection = teacherProfile.section?.trim() || SLA_SECTIONS[6];
   const allStudents = allProfiles.filter((p) => p.role === 'student');
+  const allTeachers = allProfiles.filter((p) => p.role === 'teacher');
 
   const availableRoomSections = Array.from(
     new Set([
@@ -186,6 +247,50 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     const { isOnline } = getStudentPresence(st, nowMs);
     return presenceFilter === 'online' ? isOnline : !isOnline;
   });
+
+  // Admin Campus-wide live monitoring metrics
+  const onlineTeachersCount = allTeachers.filter((t) => getStudentPresence(t, nowMs).isOnline).length;
+  const allOnlineStudentsCount = allStudents.filter((s) => getStudentPresence(s, nowMs).isOnline).length;
+  const inQuizStudentsCount = allStudents.filter(
+    (s) => getStudentPresence(s, nowMs).isOnline && /^(Playing|Hosting):/i.test(s.activeGame || '')
+  ).length;
+  const allLockedCampusCount = alerts.filter((a) => a.status === 'locked').length;
+  const visibleTeachers = [...allTeachers]
+    .filter((t) => {
+      if (presenceFilter === 'all') return true;
+      const { isOnline } = getStudentPresence(t, nowMs);
+      return presenceFilter === 'online' ? isOnline : !isOnline;
+    })
+    .sort((a, b) => {
+      const aOn = getStudentPresence(a, nowMs).isOnline ? 1 : 0;
+      const bOn = getStudentPresence(b, nowMs).isOnline ? 1 : 0;
+      if (aOn !== bOn) return bOn - aOn;
+      return a.displayName.localeCompare(b.displayName);
+    });
+
+  const profileByUid = new Map(allProfiles.map((p) => [p.uid, p]));
+  const campusActivityFeed = isAdmin
+    ? [
+        ...records.slice(0, 12).map((r) => ({
+          id: `rec_${r.id}`,
+          kind: 'score' as const,
+          actorName: r.studentName,
+          section: profileByUid.get(r.studentId)?.section || '',
+          detail: `Completed ${r.gameTitle} (${r.subject}) · ${r.score} pts (${r.correctCount}/${r.totalCount})`,
+          ts: timestampToMillis(r.createdAt),
+        })),
+        ...alerts.slice(0, 12).map((al) => ({
+          id: `al_${al.id}`,
+          kind: 'alert' as const,
+          actorName: al.studentName,
+          section: profileByUid.get(al.studentId)?.section || '',
+          detail: `${al.status === 'locked' ? 'Locked in' : 'Allowed back in'} ${al.gameTitle} — ${al.reason}`,
+          ts: timestampToMillis(al.createdAt),
+        })),
+      ]
+        .sort((a, b) => b.ts - a.ts)
+        .slice(0, 12)
+    : [];
 
   const resetBuilder = () => {
     setEditingDeckId(null);
@@ -226,6 +331,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
       setBuilderFeedback(null);
       setPptxStatus(`Extracted ${extracted.length} questions from ${slides.length} slides! Review & publish below.`);
       setTab('builder');
+      onSetActivity?.('Building Quiz Deck');
       soundFx.playLevelUp();
     } catch (err) {
       setPptxStatus(err instanceof Error ? err.message : 'Failed to parse .pptx file.');
@@ -248,6 +354,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     setQuestions(extracted);
     setBuilderFeedback(null);
     setTab('builder');
+    onSetActivity?.('Building Quiz Deck');
     soundFx.playLevelUp();
   };
 
@@ -288,6 +395,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     );
     setBuilderFeedback(null);
     setTab('builder');
+    onSetActivity?.('Building Quiz Deck');
   };
 
   const handlePublishDeck = async (e: React.FormEvent) => {
@@ -485,7 +593,17 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                   type="button"
                   onClick={() => {
                     soundFx.playClick();
-                    setTab(t.id as MonitorTab);
+                    const nextTab = t.id as MonitorTab;
+                    setTab(nextTab);
+                    if (nextTab === 'live') {
+                      onSetActivity?.(isAdmin ? 'Admin Live Monitor' : `Monitoring: ${myTeachingSection}`);
+                    } else if (nextTab === 'pptx') {
+                      onSetActivity?.('Importing PPTX Slides');
+                    } else if (nextTab === 'builder') {
+                      onSetActivity?.('Building Quiz Deck');
+                    } else if (nextTab === 'admin') {
+                      onSetActivity?.('Admin & Secret Codes');
+                    }
                   }}
                   className={`px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
                     tab === t.id ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
@@ -633,280 +751,560 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
       </div>
 
       {tab === 'live' && (
-        <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h3 className="text-lg font-bold text-[#172A1E]">
-                {isAdmin && activeRoomSection === 'ALL'
-                  ? 'All Students — Pet Progress & Integrity Status'
-                  : `${activeRoomSection === '__UNASSIGNED__' ? 'Unassigned Students' : activeRoomSection} — Student Roster (${students.length})`}
-              </h3>
-              <p className="text-xs text-[#4D6354]">
-                Track every student in your classroom room: live online/offline presence, pet level, quiz performance, and anti-cheat focus status.
-              </p>
+        <div className="space-y-6">
+          {/* Admin Campus-Wide Overview Metrics */}
+          {isAdmin && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#4D6354]">Students Online</p>
+                  <p className="text-2xl font-extrabold text-[#172A1E] mt-1 tabular-nums">
+                    {allOnlineStudentsCount} <span className="text-sm font-semibold text-[#4D6354]">/ {allStudents.length}</span>
+                  </p>
+                  <p className="text-[11px] font-semibold text-[#EA7A26] mt-0.5">
+                    {inQuizStudentsCount} actively in quiz
+                  </p>
+                </div>
+                <div className="w-11 h-11 rounded-2xl bg-emerald-50 text-[#1E5B3A] flex items-center justify-center shrink-0">
+                  <Users className="w-5 h-5" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#4D6354]">Teachers Online</p>
+                  <p className="text-2xl font-extrabold text-[#172A1E] mt-1 tabular-nums">
+                    {onlineTeachersCount} <span className="text-sm font-semibold text-[#4D6354]">/ {allTeachers.length}</span>
+                  </p>
+                  <p className="text-[11px] font-semibold text-[#1E5B3A] mt-0.5">
+                    {allTeachers.filter((t) => Boolean((t.section || '').trim())).length} assigned rooms
+                  </p>
+                </div>
+                <div className="w-11 h-11 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-[#1E5B3A] flex items-center justify-center shrink-0">
+                  <GraduationCap className="w-5 h-5" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#4D6354]">Integrity Alerts</p>
+                  <p className={`text-2xl font-extrabold mt-1 tabular-nums ${allLockedCampusCount > 0 ? 'text-red-600' : 'text-[#1E5B3A]'}`}>
+                    {allLockedCampusCount} Locked
+                  </p>
+                  <p className="text-[11px] text-[#4D6354] mt-0.5">{alerts.length} total strikes logged</p>
+                </div>
+                <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${allLockedCampusCount > 0 ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-[#1E5B3A]'}`}>
+                  <AlertOctagon className="w-5 h-5" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#4D6354]">Classrooms &amp; Decks</p>
+                  <p className="text-2xl font-extrabold text-[#172A1E] mt-1 tabular-nums">
+                    {availableRoomSections.length} Rooms
+                  </p>
+                  <p className="text-[11px] text-[#4D6354] mt-0.5">{customDecks.length} custom quiz decks</p>
+                </div>
+                <div className="w-11 h-11 rounded-2xl bg-[#EA7A26]/10 text-[#EA7A26] flex items-center justify-center shrink-0">
+                  <BookOpen className="w-5 h-5" />
+                </div>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9] text-xs font-semibold">
+          )}
+
+          {/* Admin Teachers Live Monitor */}
+          {isAdmin && (
+            <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-bold text-[#172A1E] flex items-center gap-2">
+                    <GraduationCap className="w-5 h-5 text-[#1E5B3A]" />
+                    Teachers Live Monitor — Who&apos;s Teaching &amp; What They Are Doing
+                  </h3>
+                  <p className="text-xs text-[#4D6354]">
+                    Monitor every teacher&apos;s online status, assigned classroom section, active task, and published decks in real time.
+                  </p>
+                </div>
+                <span className="text-xs font-semibold text-[#1E5B3A] bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl tabular-nums">
+                  {onlineTeachersCount} Online · {allTeachers.length - onlineTeachersCount} Offline
+                </span>
+              </div>
+
+              {visibleTeachers.length === 0 ? (
+                <p className="text-sm text-[#4D6354] py-6 text-center bg-[#FAF8F2] rounded-2xl">
+                  {allTeachers.length === 0
+                    ? 'No teacher accounts registered yet. Teachers can sign in with the Teacher Secret Code or be authorized under Admin & Secret Codes.'
+                    : `No ${presenceFilter} teachers right now.`}
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
+                        <th className="py-3 pr-4 font-semibold">Teacher</th>
+                        <th className="py-3 pr-4 font-semibold">Presence</th>
+                        <th className="py-3 pr-4 font-semibold">Assigned Classroom</th>
+                        <th className="py-3 pr-4 font-semibold">What They Are Doing</th>
+                        <th className="py-3 pr-4 font-semibold">Decks</th>
+                        <th className="py-3 font-semibold text-right">Room Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#F2EFE6]">
+                      {visibleTeachers.map((t) => {
+                        const presence = getStudentPresence(t, nowMs);
+                        const activity = getActivityBadge(t, presence.isOnline);
+                        const teacherSec = (t.section || '').trim();
+                        const roomStudentCount = teacherSec
+                          ? allStudents.filter((s) => (s.section || '').trim() === teacherSec).length
+                          : 0;
+                        const teacherDecksCount = customDecks.filter((d) => d.teacherId === t.uid).length;
+                        const isInspectingThisRoom = Boolean(teacherSec && adminRoomFilter === teacherSec);
+
+                        return (
+                          <tr key={t.uid}>
+                            <td className="py-3 pr-4 font-semibold text-[#172A1E]">
+                              <div className="flex items-center gap-2.5">
+                                <div className="relative shrink-0">
+                                  {t.photoUrl ? (
+                                    <img
+                                      src={t.photoUrl}
+                                      alt={t.displayName}
+                                      referrerPolicy="no-referrer"
+                                      className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A]"
+                                    />
+                                  ) : (
+                                    <PetAvatar
+                                      species={t.petSpecies}
+                                      color={t.petColor}
+                                      outfit={t.outfit}
+                                      accessory={t.accessory}
+                                      size={36}
+                                    />
+                                  )}
+                                  <span
+                                    title={presence.label}
+                                    className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                                      presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                    }`}
+                                  />
+                                </div>
+                                <div>
+                                  <span>{t.displayName}</span>
+                                  <p className="text-[11px] font-normal text-[#4D6354]">Faculty Teacher</p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3 pr-4">
+                              <div className="text-xs">
+                                <span
+                                  className={`inline-flex items-center gap-1.5 font-bold ${
+                                    presence.isOnline ? 'text-emerald-700' : 'text-[#4D6354]'
+                                  }`}
+                                >
+                                  <span
+                                    className={`w-2 h-2 rounded-full ${
+                                      presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                    }`}
+                                  />
+                                  {presence.label}
+                                </span>
+                                <p className="text-[11px] text-[#4D6354]">{presence.lastSeenText}</p>
+                              </div>
+                            </td>
+                            <td className="py-3 pr-4 text-xs">
+                              <p className="font-semibold text-[#172A1E]">
+                                {teacherSec || 'Unassigned'}
+                              </p>
+                              <p className="text-[11px] text-[#4D6354] tabular-nums">
+                                {roomStudentCount} {roomStudentCount === 1 ? 'student' : 'students'}
+                              </p>
+                            </td>
+                            <td className="py-3 pr-4">
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold ${activity.className}`}
+                              >
+                                <Activity className="w-3.5 h-3.5 shrink-0" />
+                                {activity.label}
+                              </span>
+                            </td>
+                            <td className="py-3 pr-4 text-xs font-bold text-[#172A1E] tabular-nums">
+                              {teacherDecksCount}
+                            </td>
+                            <td className="py-3 text-right">
+                              {teacherSec ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    soundFx.playClick();
+                                    setAdminRoomFilter(isInspectingThisRoom ? 'ALL' : teacherSec);
+                                  }}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                                    isInspectingThisRoom
+                                      ? 'bg-[#EA7A26] text-white'
+                                      : 'border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5'
+                                  }`}
+                                >
+                                  {isInspectingThisRoom ? 'Viewing Room' : 'Inspect Room'}
+                                </button>
+                              ) : (
+                                <span className="text-xs text-[#4D6354]">No room</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Student Roster & Live Activity */}
+          <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-[#172A1E]">
+                  {isAdmin && activeRoomSection === 'ALL'
+                    ? 'All Students — Live Activity, Pet Progress & Integrity Status'
+                    : `${activeRoomSection === '__UNASSIGNED__' ? 'Unassigned Students' : activeRoomSection} — Student Roster (${students.length})`}
+                </h3>
+                <p className="text-xs text-[#4D6354]">
+                  Track every student in real time: online/offline presence, what they are doing right now, pet level, quiz performance, and anti-cheat focus status.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9] text-xs font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => setPresenceFilter('all')}
+                    className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                      presenceFilter === 'all' ? 'bg-white text-[#172A1E] shadow-sm' : 'text-[#4D6354]'
+                    }`}
+                  >
+                    All ({students.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPresenceFilter('online')}
+                    className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors inline-flex items-center gap-1.5 ${
+                      presenceFilter === 'online' ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
+                    }`}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                    Online ({onlineCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPresenceFilter('offline')}
+                    className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors inline-flex items-center gap-1.5 ${
+                      presenceFilter === 'offline' ? 'bg-[#4D6354] text-white' : 'text-[#4D6354]'
+                    }`}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-stone-400" />
+                    Offline ({offlineCount})
+                  </button>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setPresenceFilter('all')}
-                  className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors ${
-                    presenceFilter === 'all' ? 'bg-white text-[#172A1E] shadow-sm' : 'text-[#4D6354]'
-                  }`}
+                  onClick={() => {
+                    soundFx.playClick();
+                    downloadLeaderboardCsv(students, records);
+                  }}
+                  className="px-4 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold flex items-center gap-2 cursor-pointer"
                 >
-                  All ({students.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPresenceFilter('online')}
-                  className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors inline-flex items-center gap-1.5 ${
-                    presenceFilter === 'online' ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
-                  }`}
-                >
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Online ({onlineCount})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPresenceFilter('offline')}
-                  className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors inline-flex items-center gap-1.5 ${
-                    presenceFilter === 'offline' ? 'bg-[#4D6354] text-white' : 'text-[#4D6354]'
-                  }`}
-                >
-                  <span className="w-2 h-2 rounded-full bg-stone-400" />
-                  Offline ({offlineCount})
+                  <Download className="w-4 h-4" />
+                  Export Room CSV
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  soundFx.playClick();
-                  downloadLeaderboardCsv(students, records);
-                }}
-                className="px-4 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold flex items-center gap-2 cursor-pointer"
-              >
-                <Download className="w-4 h-4" />
-                Export Room CSV
-              </button>
             </div>
-          </div>
 
-          {filteredStudents.length === 0 ? (
-            <p className="text-sm text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
-              {students.length === 0
-                ? isAdmin
-                  ? 'No student accounts in this filter yet.'
-                  : `No students enrolled in "${myTeachingSection}" yet. Students who pick "${myTeachingSection}" will appear in your room automatically.`
-                : `No ${presenceFilter} students right now in this classroom.`}
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
-                    <th className="py-3 pr-4 font-semibold">Student</th>
-                    <th className="py-3 pr-4 font-semibold">Presence</th>
-                    <th className="py-3 pr-4 font-semibold">Pet Progress</th>
-                    <th className="py-3 pr-4 font-semibold">Care Avg</th>
-                    <th className="py-3 pr-4 font-semibold">Accuracy</th>
-                    <th className="py-3 pr-4 font-semibold">Score</th>
-                    <th className="py-3 pr-4 font-semibold">Strikes</th>
-                    <th className="py-3 font-semibold text-right">Focus Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#F2EFE6]">
-                  {filteredStudents.map((st) => {
-                    const careAvg = Math.round((st.hunger + st.happiness + st.energy + st.cleanliness) / 4);
-                    const acc =
-                      st.totalAnswers > 0
-                        ? Math.round((st.correctAnswers / st.totalAnswers) * 100)
-                        : 0;
-                    const matchingAlert = lockedAlerts.find((a) => a.studentId === st.uid);
-                    const strikeCount = roomAlerts.filter((a) => a.studentId === st.uid).length;
-                    const presence = getStudentPresence(st, nowMs);
+            {filteredStudents.length === 0 ? (
+              <p className="text-sm text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
+                {students.length === 0
+                  ? isAdmin
+                    ? 'No student accounts in this filter yet.'
+                    : `No students enrolled in "${myTeachingSection}" yet. Students who pick "${myTeachingSection}" will appear in your room automatically.`
+                  : `No ${presenceFilter} students right now in this classroom.`}
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
+                      <th className="py-3 pr-4 font-semibold">Student</th>
+                      <th className="py-3 pr-4 font-semibold">Presence</th>
+                      <th className="py-3 pr-4 font-semibold">What They Are Doing</th>
+                      <th className="py-3 pr-4 font-semibold">Pet Progress</th>
+                      <th className="py-3 pr-4 font-semibold">Care Avg</th>
+                      <th className="py-3 pr-4 font-semibold">Accuracy</th>
+                      <th className="py-3 pr-4 font-semibold">Score</th>
+                      <th className="py-3 pr-4 font-semibold">Strikes</th>
+                      <th className="py-3 font-semibold text-right">Focus Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F2EFE6]">
+                    {filteredStudents.map((st) => {
+                      const careAvg = Math.round((st.hunger + st.happiness + st.energy + st.cleanliness) / 4);
+                      const acc =
+                        st.totalAnswers > 0
+                          ? Math.round((st.correctAnswers / st.totalAnswers) * 100)
+                          : 0;
+                      const matchingAlert = lockedAlerts.find((a) => a.studentId === st.uid);
+                      const strikeCount = roomAlerts.filter((a) => a.studentId === st.uid).length;
+                      const presence = getStudentPresence(st, nowMs);
+                      const activity = getActivityBadge(st, presence.isOnline);
 
-                    return (
-                      <tr key={st.uid}>
-                        <td className="py-3 pr-4 font-semibold text-[#172A1E]">
-                          <div className="flex items-center gap-2.5">
-                            <div className="relative shrink-0">
-                              {st.photoUrl ? (
-                                <img
-                                  src={st.photoUrl}
-                                  alt={st.displayName}
-                                  referrerPolicy="no-referrer"
-                                  className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A]"
+                      return (
+                        <tr key={st.uid}>
+                          <td className="py-3 pr-4 font-semibold text-[#172A1E]">
+                            <div className="flex items-center gap-2.5">
+                              <div className="relative shrink-0">
+                                {st.photoUrl ? (
+                                  <img
+                                    src={st.photoUrl}
+                                    alt={st.displayName}
+                                    referrerPolicy="no-referrer"
+                                    className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A]"
+                                  />
+                                ) : (
+                                  <PetAvatar
+                                    species={st.petSpecies}
+                                    color={st.petColor}
+                                    outfit={st.outfit}
+                                    accessory={st.accessory}
+                                    size={36}
+                                  />
+                                )}
+                                <span
+                                  title={presence.label}
+                                  className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                                    presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                  }`}
                                 />
-                              ) : (
-                                <PetAvatar
-                                  species={st.petSpecies}
-                                  color={st.petColor}
-                                  outfit={st.outfit}
-                                  accessory={st.accessory}
-                                  size={36}
-                                />
-                              )}
+                              </div>
+                              <div>
+                                <span>{st.displayName}</span>
+                                {st.section && (
+                                  <p className="text-[11px] font-normal text-[#4D6354]">{st.section}</p>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3 pr-4">
+                            <div className="text-xs">
                               <span
-                                title={presence.label}
-                                className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
-                                  presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                className={`inline-flex items-center gap-1.5 font-bold ${
+                                  presence.isOnline ? 'text-emerald-700' : 'text-[#4D6354]'
                                 }`}
-                              />
+                              >
+                                <span
+                                  className={`w-2 h-2 rounded-full ${
+                                    presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                  }`}
+                                />
+                                {presence.label}
+                              </span>
+                              <p className="text-[11px] text-[#4D6354]">{presence.lastSeenText}</p>
                             </div>
-                            <div>
-                              <span>{st.displayName}</span>
-                              {st.section && (
-                                <p className="text-[11px] font-normal text-[#4D6354]">{st.section}</p>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-3 pr-4">
-                          <div className="text-xs">
+                          </td>
+                          <td className="py-3 pr-4">
                             <span
-                              className={`inline-flex items-center gap-1.5 font-bold ${
-                                presence.isOnline ? 'text-emerald-700' : 'text-[#4D6354]'
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold whitespace-nowrap ${activity.className}`}
+                            >
+                              <Activity className="w-3.5 h-3.5 shrink-0" />
+                              {activity.label}
+                            </span>
+                          </td>
+                          <td className="py-3 pr-4 text-[#4D6354] capitalize">
+                            {st.petName} · Lv. {st.petLevel}
+                          </td>
+                          <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{careAvg}%</td>
+                          <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{acc}%</td>
+                          <td className="py-3 pr-4 font-bold text-[#1E5B3A] tabular-nums">
+                            {st.totalScore}
+                          </td>
+                          <td className="py-3 pr-4 tabular-nums">
+                            <span
+                              className={`text-xs font-bold ${
+                                strikeCount >= 3
+                                  ? 'text-red-700'
+                                  : strikeCount > 0
+                                    ? 'text-[#EA7A26]'
+                                    : 'text-[#4D6354]'
                               }`}
                             >
+                              {strikeCount} {strikeCount === 1 ? 'Strike' : 'Strikes'}
+                            </span>
+                          </td>
+                          <td className="py-3 text-right">
+                            {st.lockedOut ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (matchingAlert) {
+                                    void onAllowStudent(matchingAlert);
+                                  }
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-bold cursor-pointer"
+                              >
+                                Locked · Allow
+                              </button>
+                            ) : (
                               <span
-                                className={`w-2 h-2 rounded-full ${
-                                  presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                className={`inline-flex items-center gap-1 text-xs font-semibold ${
+                                  presence.isOnline ? 'text-[#1E5B3A]' : 'text-[#4D6354]'
                                 }`}
-                              />
-                              {presence.label}
-                            </span>
-                            <p className="text-[11px] text-[#4D6354]">{presence.lastSeenText}</p>
-                          </div>
-                        </td>
-                        <td className="py-3 pr-4 text-[#4D6354] capitalize">
-                          {st.petName} · Lv. {st.petLevel}
-                        </td>
-                        <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{careAvg}%</td>
-                        <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{acc}%</td>
-                        <td className="py-3 pr-4 font-bold text-[#1E5B3A] tabular-nums">
-                          {st.totalScore}
-                        </td>
-                        <td className="py-3 pr-4 tabular-nums">
-                          <span
-                            className={`text-xs font-bold ${
-                              strikeCount >= 3
-                                ? 'text-red-700'
-                                : strikeCount > 0
-                                  ? 'text-[#EA7A26]'
-                                  : 'text-[#4D6354]'
-                            }`}
-                          >
-                            {strikeCount} {strikeCount === 1 ? 'Strike' : 'Strikes'}
-                          </span>
-                        </td>
-                        <td className="py-3 text-right">
-                          {st.lockedOut ? (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (matchingAlert) {
-                                  void onAllowStudent(matchingAlert);
-                                }
-                              }}
-                              className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-bold cursor-pointer"
-                            >
-                              Locked · Allow
-                            </button>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#1E5B3A]">
-                              <ShieldCheck className="w-3.5 h-3.5" />
-                              {presence.isOnline ? `Active (${st.activeGame || 'Lobby'})` : 'Signed Out'}
-                            </span>
-                          )}
-                        </td>
-                      </tr>
+                              >
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                                {presence.isOnline ? 'Focused' : 'Offline'}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Helper for legacy/unassigned students so teachers can claim them into their room */}
+            {unassignedStudents.length > 0 && (!isAdmin || adminRoomFilter !== '__UNASSIGNED__') && (
+              <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
+                <div>
+                  <h4 className="text-sm font-bold text-[#172A1E]">
+                    Unassigned Students Without a Section ({unassignedStudents.length})
+                  </h4>
+                  <p className="text-xs text-[#4D6354]">
+                    Assign students who have not picked a section yet directly into{' '}
+                    <strong>{isAdmin && activeRoomSection !== 'ALL' ? activeRoomSection : myTeachingSection}</strong>.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                  {unassignedStudents.map((st) => {
+                    const targetSec =
+                      isAdmin && activeRoomSection !== 'ALL' && activeRoomSection !== '__UNASSIGNED__'
+                        ? activeRoomSection
+                        : myTeachingSection;
+                    return (
+                      <div
+                        key={st.uid}
+                        className="p-3 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-[#172A1E] truncate">{st.displayName}</p>
+                          <p className="text-[11px] text-[#4D6354] truncate">Pet: {st.petName}</p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={assigningUid === st.uid}
+                          onClick={async () => {
+                            setAssigningUid(st.uid);
+                            try {
+                              await onAssignStudentSection(st.uid, targetSec);
+                              soundFx.playCorrect();
+                            } finally {
+                              setAssigningUid(null);
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#1E5B3A] hover:bg-[#17462C] text-white text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-60"
+                        >
+                          {assigningUid === st.uid ? 'Adding...' : '+ Add to Class'}
+                        </button>
+                      </div>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* Helper for legacy/unassigned students so teachers can claim them into their room */}
-          {unassignedStudents.length > 0 && (!isAdmin || adminRoomFilter !== '__UNASSIGNED__') && (
-            <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
-              <div>
-                <h4 className="text-sm font-bold text-[#172A1E]">
-                  Unassigned Students Without a Section ({unassignedStudents.length})
-                </h4>
-                <p className="text-xs text-[#4D6354]">
-                  Assign students who have not picked a section yet directly into{' '}
-                  <strong>{isAdmin && activeRoomSection !== 'ALL' ? activeRoomSection : myTeachingSection}</strong>.
-                </p>
+                </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                {unassignedStudents.map((st) => {
-                  const targetSec =
-                    isAdmin && activeRoomSection !== 'ALL' && activeRoomSection !== '__UNASSIGNED__'
-                      ? activeRoomSection
-                      : myTeachingSection;
-                  return (
-                    <div
-                      key={st.uid}
-                      className="p-3 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] flex items-center justify-between gap-2"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-xs font-bold text-[#172A1E] truncate">{st.displayName}</p>
-                        <p className="text-[11px] text-[#4D6354] truncate">Pet: {st.petName}</p>
+            )}
+
+            {roomAlerts.length > 0 && (
+              <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
+                <div>
+                  <h4 className="text-sm font-bold text-[#172A1E]">
+                    Classroom Integrity Violation History ({roomAlerts.length})
+                  </h4>
+                  <p className="text-xs text-[#4D6354]">
+                    Permanent log of every tab switch, split-screen, fullscreen exit, or copy/paste attempt — even after a student is allowed back.
+                  </p>
+                </div>
+                <div className="divide-y divide-[#F2EFE6] max-h-64 overflow-y-auto">
+                  {roomAlerts.slice(0, 25).map((al) => (
+                    <div key={al.id} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div>
+                        <span className="font-bold text-[#172A1E]">{al.studentName}</span>
+                        <span className="text-[#4D6354]"> · {al.gameTitle} ({al.subject})</span>
+                        <p className="text-red-700 mt-0.5">{al.reason}</p>
                       </div>
-                      <button
-                        type="button"
-                        disabled={assigningUid === st.uid}
-                        onClick={async () => {
-                          setAssigningUid(st.uid);
-                          try {
-                            await onAssignStudentSection(st.uid, targetSec);
-                            soundFx.playCorrect();
-                          } finally {
-                            setAssigningUid(null);
-                          }
-                        }}
-                        className="px-2.5 py-1.5 rounded-lg bg-[#1E5B3A] hover:bg-[#17462C] text-white text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-60"
-                      >
-                        {assigningUid === st.uid ? 'Adding...' : '+ Add to Class'}
-                      </button>
+                      <div className="text-right">
+                        <span
+                          className={`font-bold capitalize ${
+                            al.status === 'locked' ? 'text-red-600' : 'text-[#1E5B3A]'
+                          }`}
+                        >
+                          {al.status === 'locked' ? 'Currently Locked' : `Allowed by ${al.resolvedBy || 'Teacher'}`}
+                        </span>
+                      </div>
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
-          {roomAlerts.length > 0 && (
-            <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
-              <div>
-                <h4 className="text-sm font-bold text-[#172A1E]">
-                  Classroom Integrity Violation History ({roomAlerts.length})
-                </h4>
-                <p className="text-xs text-[#4D6354]">
-                  Permanent log of every tab switch, split-screen, fullscreen exit, or copy/paste attempt — even after a student is allowed back.
-                </p>
+          {/* Admin Recent School Activity Feed */}
+          {isAdmin && (
+            <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-bold text-[#172A1E] flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-[#EA7A26]" />
+                    Recent School Activity Feed
+                  </h3>
+                  <p className="text-xs text-[#4D6354]">
+                    Latest quiz completions and integrity events across all San Lorenzo Academy classrooms.
+                  </p>
+                </div>
+                <span className="text-xs font-semibold text-[#4D6354]">
+                  Showing {campusActivityFeed.length} recent events
+                </span>
               </div>
-              <div className="divide-y divide-[#F2EFE6] max-h-64 overflow-y-auto">
-                {roomAlerts.slice(0, 25).map((al) => (
-                  <div key={al.id} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <div>
-                      <span className="font-bold text-[#172A1E]">{al.studentName}</span>
-                      <span className="text-[#4D6354]"> · {al.gameTitle} ({al.subject})</span>
-                      <p className="text-red-700 mt-0.5">{al.reason}</p>
-                    </div>
-                    <div className="text-right">
-                      <span
-                        className={`font-bold capitalize ${
-                          al.status === 'locked' ? 'text-red-600' : 'text-[#1E5B3A]'
-                        }`}
-                      >
-                        {al.status === 'locked' ? 'Currently Locked' : `Allowed by ${al.resolvedBy || 'Teacher'}`}
+
+              {campusActivityFeed.length === 0 ? (
+                <p className="text-sm text-[#4D6354] py-6 text-center bg-[#FAF8F2] rounded-2xl">
+                  No quiz completions or integrity events recorded yet.
+                </p>
+              ) : (
+                <div className="divide-y divide-[#F2EFE6]">
+                  {campusActivityFeed.map((item) => (
+                    <div key={item.id} className="py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+                      <div className="flex items-start gap-2.5 min-w-0">
+                        <span
+                          className={`mt-1 w-2 h-2 rounded-full shrink-0 ${
+                            item.kind === 'alert' ? 'bg-red-500' : 'bg-emerald-500'
+                          }`}
+                        />
+                        <div className="min-w-0">
+                          <p className="text-[#172A1E]">
+                            <span className="font-bold">{item.actorName}</span>
+                            {item.section && (
+                              <span className="text-[#4D6354]"> · {item.section}</span>
+                            )}
+                          </p>
+                          <p className={item.kind === 'alert' ? 'text-red-700 font-medium mt-0.5' : 'text-[#4D6354] mt-0.5'}>
+                            {item.detail}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[11px] font-semibold text-[#4D6354] whitespace-nowrap">
+                        {formatLastSeen(item.ts, nowMs)}
                       </span>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1499,6 +1897,197 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             </div>
           </div>
         </div>
+
+          {/* Admin Reset Web App & Classroom Data */}
+          {onAdminResetApp && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (resetConfirmText.trim().toUpperCase() !== 'RESET' || resetBusy) return;
+                setResetBusy(true);
+                setResetFeedback(null);
+                try {
+                  const summary = await onAdminResetApp({
+                    mode: resetMode,
+                    includeCustomDecks: resetDecks,
+                    includeFacultyAllowlist: resetMode === 'full_wipe' ? resetAllowlist : false,
+                    resetSelfProfile: resetMode === 'full_wipe' ? resetSelf : false,
+                  });
+                  soundFx.playLevelUp();
+                  setResetConfirmText('');
+                  setResetFeedback({
+                    type: 'ok',
+                    text:
+                      resetMode === 'scores_only'
+                        ? `Reset complete: cleared ${summary.deletedScores} scores, ${summary.deletedAlerts} alerts, ${summary.deletedDecks} custom decks, and reset stats for ${summary.affectedProfiles} accounts.`
+                        : `Full reset complete: removed ${summary.affectedProfiles} accounts, ${summary.deletedScores} scores, ${summary.deletedAlerts} alerts, and ${summary.deletedDecks} custom decks.`,
+                  });
+                } catch (err) {
+                  soundFx.playWrong();
+                  setResetFeedback({
+                    type: 'err',
+                    text: err instanceof Error ? err.message : 'Unable to reset web app data.',
+                  });
+                } finally {
+                  setResetBusy(false);
+                }
+              }}
+              className="bg-white rounded-3xl border-2 border-red-200 p-6 space-y-5"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-red-900 flex items-center gap-2">
+                    <RotateCcw className="w-5 h-5 text-red-600" />
+                    Reset Web App &amp; Classroom Data
+                  </h3>
+                  <p className="text-xs text-[#4D6354] mt-1">
+                    Start a new semester or wipe test data directly from your Admin console without opening Firebase Console.
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-lg bg-red-50 border border-red-200 text-[11px] font-bold text-red-700">
+                  Admin Only · Permanent Action
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label
+                  className={`p-4 rounded-2xl border cursor-pointer transition-colors ${
+                    resetMode === 'scores_only'
+                      ? 'bg-[#FAF8F2] border-[#1E5B3A]'
+                      : 'bg-white border-[#E5DEC9] hover:bg-[#FAF8F2]'
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <input
+                      type="radio"
+                      name="adminResetMode"
+                      checked={resetMode === 'scores_only'}
+                      onChange={() => {
+                        setResetMode('scores_only');
+                        setResetDecks(false);
+                        setResetAllowlist(false);
+                        setResetSelf(false);
+                      }}
+                      className="mt-1"
+                    />
+                    <div>
+                      <p className="text-sm font-bold text-[#172A1E]">
+                        Reset Scores, Alerts &amp; Pet Stats (Keep Accounts)
+                      </p>
+                      <p className="text-xs text-[#4D6354] mt-1">
+                        Clears all leaderboard scores and integrity strikes, and resets every user&apos;s coins (120), XP, and level back to Level 1 while keeping their login &amp; section.
+                      </p>
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`p-4 rounded-2xl border cursor-pointer transition-colors ${
+                    resetMode === 'full_wipe'
+                      ? 'bg-red-50/70 border-red-400'
+                      : 'bg-white border-[#E5DEC9] hover:bg-[#FAF8F2]'
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <input
+                      type="radio"
+                      name="adminResetMode"
+                      checked={resetMode === 'full_wipe'}
+                      onChange={() => {
+                        setResetMode('full_wipe');
+                        setResetDecks(true);
+                      }}
+                      className="mt-1"
+                    />
+                    <div>
+                      <p className="text-sm font-bold text-red-900">
+                        Full Website Reset (Wipe All Accounts &amp; Data)
+                      </p>
+                      <p className="text-xs text-red-700 mt-1">
+                        Deletes all student and teacher accounts (they will go through onboarding again), plus all scores and anti-cheat alerts.
+                      </p>
+                    </div>
+                  </div>
+                </label>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-2.5 text-xs font-semibold text-[#172A1E]">
+                <label className="flex items-center gap-2 cursor-pointer w-fit">
+                  <input
+                    type="checkbox"
+                    checked={resetDecks}
+                    onChange={(e) => setResetDecks(e.target.checked)}
+                    className="rounded border-[#D8D0BC]"
+                  />
+                  Also delete all custom &amp; imported PPTX quiz decks ({customDecks.length})
+                </label>
+
+                {resetMode === 'full_wipe' && (
+                  <>
+                    <label className="flex items-center gap-2 cursor-pointer w-fit">
+                      <input
+                        type="checkbox"
+                        checked={resetAllowlist}
+                        onChange={(e) => setResetAllowlist(e.target.checked)}
+                        className="rounded border-[#D8D0BC]"
+                      />
+                      Also clear the pre-authorized teacher Gmail allowlist ({authorizedFaculty.length})
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer w-fit text-red-700">
+                      <input
+                        type="checkbox"
+                        checked={resetSelf}
+                        onChange={(e) => setResetSelf(e.target.checked)}
+                        className="rounded border-red-300"
+                      />
+                      Also delete my own Admin profile and restart onboarding
+                    </label>
+                  </>
+                )}
+              </div>
+
+              {resetFeedback && (
+                <div
+                  className={`p-3.5 rounded-xl border text-xs font-semibold ${
+                    resetFeedback.type === 'ok'
+                      ? 'bg-emerald-50 border-emerald-200 text-[#1E5B3A]'
+                      : 'bg-red-50 border-red-200 text-red-700'
+                  }`}
+                >
+                  {resetFeedback.text}
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                <div className="flex items-center gap-2">
+                  <label htmlFor="admin-reset-confirm" className="text-xs font-bold text-[#172A1E] whitespace-nowrap">
+                    Type <span className="font-mono text-red-700">RESET</span> to confirm:
+                  </label>
+                  <input
+                    id="admin-reset-confirm"
+                    type="text"
+                    value={resetConfirmText}
+                    onChange={(e) => setResetConfirmText(e.target.value)}
+                    placeholder="RESET"
+                    maxLength={10}
+                    className="px-3 py-2 rounded-xl border border-red-200 bg-white text-xs font-mono font-bold w-28 uppercase"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={resetBusy || resetConfirmText.trim().toUpperCase() !== 'RESET'}
+                  className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  {resetBusy
+                    ? 'Resetting Web App...'
+                    : resetMode === 'full_wipe'
+                      ? 'Execute Full Website Reset'
+                      : 'Reset Scores & Pet Stats'}
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       )}
     </div>

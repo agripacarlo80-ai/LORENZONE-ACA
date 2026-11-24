@@ -350,7 +350,8 @@ service cloud.firestore {
           (incoming().targetRole == 'teacher' && incoming().accessCode == activeTeacherCode()) ||
           (incoming().targetRole == 'admin' && incoming().accessCode == activeAdminCode())
         );
-      allow list, delete: if false;
+      allow list: if false;
+      allow delete: if isAdmin() && isValidId(userId);
     }
 
     match /authorizedFaculty/{facultyEmail} {
@@ -528,7 +529,8 @@ service cloud.firestore {
         && (incoming().studentId == request.auth.uid || isTeacher())
         && incoming().createdAt == request.time;
 
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(recordId);
     }
 
     match /antiCheatAlerts/{alertId} {

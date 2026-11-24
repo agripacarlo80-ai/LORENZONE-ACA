@@ -105,8 +105,11 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   useEffect(() => {
     if (initialGameId) {
       setActiveGameId(initialGameId);
+      const meta = GAMES_CATALOG.find((g) => g.id === initialGameId);
+      const verb = profile.role === 'student' ? 'Playing' : 'Hosting';
+      void onSetActiveGame(`${verb}: ${meta?.title || initialGameId}`);
     }
-  }, [initialGameId]);
+  }, [initialGameId, onSetActiveGame, profile.role]);
 
   // Reset current round progress whenever student gets locked out so they cannot resume after consulting AI
   useEffect(() => {
@@ -277,11 +280,12 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     }
     soundFx.playClick();
     const meta = GAMES_CATALOG.find((g) => g.id === gameId);
+    const verb = profile.role === 'student' ? 'Playing' : 'Hosting';
     setGameResult(null);
     setRoundKey((k) => k + 1);
     setActiveGameId(gameId);
     enterExamFullscreen();
-    void onSetActiveGame(meta?.title || gameId);
+    void onSetActiveGame(`${verb}: ${meta?.title || gameId}`);
   };
 
   const exitGame = () => {
@@ -293,7 +297,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     setIsFullscreen(false);
     setActiveGameId(null);
     setGameResult(null);
-    void onSetActiveGame('Lobby');
+    void onSetActiveGame('Browsing Quiz Games');
   };
 
   const handleCompleteGame = async (result: GameSessionResult) => {
@@ -306,7 +310,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     soundFx.playLevelUp();
     setGameResult(result);
     await onRecordGameResult(activeGameMeta.id, activeGameMeta.title, selectedDeck, result);
-    void onSetActiveGame('Lobby');
+    void onSetActiveGame('Browsing Quiz Games');
   };
 
   // Locked Out Blocker Modal for Student
