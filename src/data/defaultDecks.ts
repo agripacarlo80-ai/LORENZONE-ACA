@@ -1,5 +1,20 @@
 import { GameMetadata, QuizDeck, ShopItem } from '../types';
 
+export const SLA_SECTIONS: string[] = [
+  'Grade 7 - St. Matthew',
+  'Grade 7 - St. Mark',
+  'Grade 8 - St. Luke',
+  'Grade 8 - St. John',
+  'Grade 9 - St. Peter',
+  'Grade 9 - St. Paul',
+  'Grade 10 - St. Lorenzo',
+  'Grade 10 - St. Pedro Calungsod',
+  'Grade 11 - STEM',
+  'Grade 11 - ABM / HUMSS',
+  'Grade 12 - STEM',
+  'Grade 12 - ABM / HUMSS',
+];
+
 export const GAMES_CATALOG: GameMetadata[] = [
   {
     id: 'lorenscape',

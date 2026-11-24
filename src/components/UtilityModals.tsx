@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { BookOpen, HelpCircle, Settings, ShieldCheck, Volume2, VolumeX, X, LogOut, KeyRound, CheckCircle2, Palette } from 'lucide-react';
+import { BookOpen, HelpCircle, Settings, ShieldCheck, Volume2, VolumeX, X, LogOut, KeyRound, CheckCircle2, Palette, School } from 'lucide-react';
+import { SLA_SECTIONS } from '../data/defaultDecks';
 import { PublicProfile, ThemeColor, UserRole } from '../types';
 import { soundFx } from '../lib/sound';
 
@@ -42,6 +43,7 @@ interface UtilityToolbarProps {
   theme: ThemeColor;
   onChangeTheme: (next: ThemeColor) => void;
   role: UserRole;
+  section?: string;
   lockedAlertCount: number;
 }
 
@@ -54,6 +56,7 @@ export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
   theme,
   onChangeTheme,
   role,
+  section,
   lockedAlertCount,
 }) => {
   return (
@@ -137,10 +140,16 @@ export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
         </div>
       </div>
 
-      <div className="text-xs text-[#4D6354] flex items-center gap-2">
+      <div className="text-xs text-[#4D6354] flex items-center gap-2 flex-wrap">
         <span>San Lorenzo Academy, Inc.</span>
         <span aria-hidden="true">·</span>
         <span className="capitalize font-semibold text-[#1E5B3A]">{role} Portal</span>
+        {section && role !== 'admin' && (
+          <>
+            <span aria-hidden="true">·</span>
+            <span className="font-semibold text-[#EA7A26]">{section}</span>
+          </>
+        )}
         {(role === 'teacher' || role === 'admin') && lockedAlertCount > 0 && (
           <>
             <span aria-hidden="true">·</span>
@@ -227,6 +236,7 @@ export const SettingsModal: React.FC<{
   onToggleMute: () => void;
   theme: ThemeColor;
   onChangeTheme: (next: ThemeColor) => void;
+  onUpdateSection: (nextSection: string) => Promise<void>;
   onClaimRoleWithCode: (targetRole: 'teacher' | 'admin', accessCode: string) => Promise<void>;
   onSignOut: () => Promise<void>;
   onClose: () => void;
@@ -237,38 +247,72 @@ export const SettingsModal: React.FC<{
   onToggleMute,
   theme,
   onChangeTheme,
+  onUpdateSection,
   onClaimRoleWithCode,
   onSignOut,
   onClose,
 }) => {
-  const [targetRole, setTargetRole] = useState<'teacher' | 'admin'>(
-    profile.role === 'teacher' ? 'admin' : 'teacher'
-  );
+  const initialSec = profile.section?.trim() || SLA_SECTIONS[6];
+  const [sectionInput, setSectionInput] = useState(initialSec);
+  const [useCustomSection, setUseCustomSection] = useState(!SLA_SECTIONS.includes(initialSec));
+  const [savingSection, setSavingSection] = useState(false);
+  const [sectionFeedback, setSectionFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
   const [secretCode, setSecretCode] = useState('');
   const [verifying, setVerifying] = useState(false);
   const [roleFeedback, setRoleFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  const handleUnlockRole = async (e: React.FormEvent) => {
+  const handleSaveSection = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = sectionInput.trim().slice(0, 40);
+    if (!cleaned) {
+      setSectionFeedback({ type: 'err', text: 'Please select or enter a valid class section.' });
+      return;
+    }
+    setSavingSection(true);
+    setSectionFeedback(null);
+    try {
+      await onUpdateSection(cleaned);
+      soundFx.playCorrect();
+      setSectionFeedback({
+        type: 'ok',
+        text:
+          profile.role === 'teacher'
+            ? `Teaching classroom set to "${cleaned}".`
+            : `Class section updated to "${cleaned}".`,
+      });
+    } catch (err) {
+      soundFx.playWrong();
+      setSectionFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to save class section.',
+      });
+    } finally {
+      setSavingSection(false);
+    }
+  };
+
+  const handleUnlockTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
     if (secretCode.trim().length < 4) {
-      setRoleFeedback({ type: 'err', text: 'Please enter a valid Teacher or Admin Secret Code.' });
+      setRoleFeedback({ type: 'err', text: 'Please enter a valid Teacher Secret Code.' });
       return;
     }
     setVerifying(true);
     setRoleFeedback(null);
     try {
-      await onClaimRoleWithCode(targetRole, secretCode.trim());
+      await onClaimRoleWithCode('teacher', secretCode.trim());
       soundFx.playLevelUp();
       setSecretCode('');
       setRoleFeedback({
         type: 'ok',
-        text: `Role updated to ${targetRole.toUpperCase()}! Faculty console unlocked.`,
+        text: 'Role updated to TEACHER! Your classroom monitor is now unlocked.',
       });
     } catch (err) {
       soundFx.playWrong();
       setRoleFeedback({
         type: 'err',
-        text: err instanceof Error ? err.message : 'Invalid secret code.',
+        text: err instanceof Error ? err.message : 'Invalid Teacher Secret Code.',
       });
     } finally {
       setVerifying(false);
@@ -280,9 +324,81 @@ export const SettingsModal: React.FC<{
       <div className="space-y-5 text-sm">
         <div className="p-4 rounded-2xl bg-[var(--lz-surface-alt)] border border-[var(--lz-border)] space-y-1">
           <p className="font-bold text-[#172A1E]">{profile.displayName}</p>
-          <p className="text-xs text-[#4D6354] capitalize">Role: {profile.role} · Pet: {profile.petName}</p>
+          <p className="text-xs text-[#4D6354] capitalize">
+            Role: {profile.role} · Section: {profile.section || 'Unassigned'} · Pet: {profile.petName}
+          </p>
           <p className="text-xs text-[#4D6354]">Private Gmail: {email}</p>
         </div>
+
+        {(profile.role === 'student' || profile.role === 'teacher') && (
+          <form onSubmit={handleSaveSection} className="p-4 rounded-2xl border border-[var(--lz-border)] space-y-3">
+            <div className="flex items-center gap-2">
+              <School className="w-4 h-4 text-[#1E5B3A]" />
+              <div>
+                <p className="font-semibold text-[#172A1E] text-xs">
+                  {profile.role === 'teacher' ? 'Assigned Teaching Classroom' : 'Enrolled Grade & Section'}
+                </p>
+                <p className="text-xs text-[#4D6354]">
+                  {profile.role === 'teacher'
+                    ? 'Choose the section you teach to monitor its students inside your individual classroom room.'
+                    : 'Choose your section so your teacher can monitor your classroom progress.'}
+                </p>
+              </div>
+            </div>
+            <select
+              value={useCustomSection ? '__custom__' : SLA_SECTIONS.includes(sectionInput) ? sectionInput : '__custom__'}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSectionFeedback(null);
+                if (val === '__custom__') {
+                  setUseCustomSection(true);
+                  if (SLA_SECTIONS.includes(sectionInput)) setSectionInput('');
+                } else {
+                  setUseCustomSection(false);
+                  setSectionInput(val);
+                }
+              }}
+              className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs font-medium focus:outline-none focus:border-[#1E5B3A]"
+            >
+              {SLA_SECTIONS.map((sec) => (
+                <option key={sec} value={sec}>
+                  {sec}
+                </option>
+              ))}
+              <option value="__custom__">Other / Custom Section...</option>
+            </select>
+            {(useCustomSection || !SLA_SECTIONS.includes(sectionInput)) && (
+              <input
+                type="text"
+                maxLength={40}
+                value={sectionInput}
+                onChange={(e) => setSectionInput(e.target.value)}
+                placeholder="Enter custom class section..."
+                className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs focus:outline-none focus:border-[#1E5B3A]"
+              />
+            )}
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                {sectionFeedback && (
+                  <p
+                    className={`text-xs font-semibold ${
+                      sectionFeedback.type === 'ok' ? 'text-[#1E5B3A]' : 'text-red-700'
+                    }`}
+                  >
+                    {sectionFeedback.text}
+                  </p>
+                )}
+              </div>
+              <button
+                type="submit"
+                disabled={savingSection}
+                className="px-3.5 py-1.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-60 whitespace-nowrap"
+              >
+                {savingSection ? 'Saving...' : 'Save Section'}
+              </button>
+            </div>
+          </form>
+        )}
 
         <div className="p-4 rounded-2xl border border-[var(--lz-border)] space-y-3">
           <div className="flex items-center gap-2">
@@ -333,43 +449,23 @@ export const SettingsModal: React.FC<{
           </button>
         </div>
 
-        {profile.role !== 'admin' && (
-          <form onSubmit={handleUnlockRole} className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
+        {profile.role === 'student' && (
+          <form onSubmit={handleUnlockTeacher} className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
             <div className="flex items-center gap-2">
               <KeyRound className="w-4 h-4 text-[#EA7A26]" />
               <p className="font-bold text-[#172A1E] text-xs">
-                Switch / Unlock Teacher or Admin Role
+                Unlock Teacher Role
               </p>
             </div>
             <p className="text-xs text-[#4D6354]">
-              Enter the academy Secret Code to switch this account to Teacher or Co-Admin.
+              Enter the Teacher Secret Code provided by your SLA Administrator to switch this account to Teacher mode.
             </p>
-            <div className="grid grid-cols-2 gap-2">
-              {(['teacher', 'admin'] as const).map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => {
-                    soundFx.playClick();
-                    setTargetRole(r);
-                    setRoleFeedback(null);
-                  }}
-                  className={`py-2 px-3 rounded-xl border text-xs font-bold capitalize cursor-pointer transition-colors ${
-                    targetRole === r
-                      ? 'border-[#EA7A26] bg-[#EA7A26] text-white'
-                      : 'border-[#D8D0BC] bg-white text-[#4D6354]'
-                  }`}
-                >
-                  {r} Code
-                </button>
-              ))}
-            </div>
             <div className="flex gap-2">
               <input
                 type="password"
                 value={secretCode}
                 onChange={(e) => setSecretCode(e.target.value)}
-                placeholder={`Enter ${targetRole} secret code`}
+                placeholder="Enter teacher secret code"
                 className="flex-1 px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs focus:outline-none focus:border-[#EA7A26]"
               />
               <button
@@ -391,6 +487,18 @@ export const SettingsModal: React.FC<{
               </p>
             )}
           </form>
+        )}
+
+        {profile.role === 'teacher' && (
+          <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-1">
+            <p className="font-bold text-[#172A1E] text-xs flex items-center gap-1.5">
+              <KeyRound className="w-4 h-4 text-[#EA7A26]" />
+              Teacher Room Access
+            </p>
+            <p className="text-xs text-[#4D6354]">
+              Teacher accounts monitor their own assigned class section and cannot escalate to Admin. Admin consoles use a separate Admin Secret Code.
+            </p>
+          </div>
         )}
 
         <div className="flex items-start gap-2.5 text-xs text-[#4D6354]">

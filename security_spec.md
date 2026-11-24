@@ -1,11 +1,12 @@
 # Lorenzone Security Specification
 
 ## 1. Data Invariants
-1. **PII Isolation**: User Gmail addresses and class sections reside exclusively in `/users/{userId}/private/info` and never in `/publicProfiles/{userId}`. Only the profile owner or a verified teacher/admin can read private info.
+1. **PII Isolation**: User Gmail addresses reside exclusively in `/users/{userId}/private/info` and never in `/publicProfiles/{userId}`. Only the profile owner or a verified teacher/admin can read private info. Non-PII classroom `section` labels may be stored on `/publicProfiles/{userId}` to enable per-section classroom monitoring.
 2. **Anti-Cheat Lockout Integrity**: When a student's `publicProfiles/{uid}` has `lockedOut == true`, the student cannot set `lockedOut` back to `false`. Only a teacher or admin can unlock the student and mark `antiCheatAlerts/{alertId}` as `status: 'allowed'`.
 3. **Immutable Ownership & Timestamps**: `uid`, `studentId`, `teacherId`, and `createdAt` are immutable once created, and `createdAt` / `updatedAt` must equal `request.time`.
 4. **Strict Field Allowlisting**: Every collection enforces exact `keys().hasAll(...)` and `keys().hasOnly(...)` on create, plus action-scoped `affectedKeys().hasOnly(...)` on update to block shadow field injection.
 5. **Verified Google Sign-In**: All read/write operations require `request.auth != null && request.auth.token.email_verified == true`.
+6. **Teacher vs. Admin Role Isolation**: Existing `teacher` accounts cannot claim or be promoted to `admin`; `config/accessCodes` maintains separate Teacher and Admin secret codes.
 
 ## 2. Dirty Dozen Attack Payloads (Expected: PERMISSION_DENIED)
 1. **Unauthenticated Profile Read**: Read `/publicProfiles/u1` without `request.auth`.

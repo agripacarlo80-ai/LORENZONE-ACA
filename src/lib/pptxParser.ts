@@ -232,6 +232,7 @@ export function downloadLeaderboardCsv(profiles: PublicProfile[], records: Score
     [
       'Rank',
       'Student Name',
+      'Section',
       'Role',
       'Pet Name',
       'Pet Species',
@@ -254,6 +255,7 @@ export function downloadLeaderboardCsv(profiles: PublicProfile[], records: Score
     rows.push([
       String(idx + 1),
       p.displayName,
+      p.section || 'Unassigned',
       p.role,
       p.petName,
       p.petSpecies,

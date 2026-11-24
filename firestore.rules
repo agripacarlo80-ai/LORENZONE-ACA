@@ -147,7 +147,7 @@ service cloud.firestore {
         'coins', 'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
         'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore', 'gamesPlayed',
         'correctAnswers', 'totalAnswers', 'isSleeping', 'lockedOut', 'lockReason',
-        'activeGame', 'photoUrl', 'isOnline', 'lastSeenAt', 'createdAt', 'updatedAt'
+        'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'createdAt', 'updatedAt'
       ])
       && isValidId(data.uid)
       && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
@@ -175,6 +175,7 @@ service cloud.firestore {
       && data.lockedOut is bool
       && data.lockReason is string && data.lockReason.size() <= 140
       && data.activeGame is string && data.activeGame.size() <= 60
+      && (!('section' in data) || (data.section is string && data.section.size() <= 40))
       && (!('photoUrl' in data) || isValidPhotoUrl(data.photoUrl))
       && (!('isOnline' in data) || data.isOnline is bool)
       && (!('lastSeenAt' in data) || data.lastSeenAt is timestamp)
@@ -281,6 +282,7 @@ service cloud.firestore {
       && data.keys().hasOnly(['teacherCode', 'adminCode', 'updatedBy', 'updatedAt'])
       && data.teacherCode is string && data.teacherCode.size() >= 4 && data.teacherCode.size() <= 40
       && data.adminCode is string && data.adminCode.size() >= 4 && data.adminCode.size() <= 40
+      && data.teacherCode != data.adminCode
       && isValidId(data.updatedBy)
       && data.updatedAt is timestamp;
     }
@@ -324,6 +326,11 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
+          incoming().targetRole != 'admin' ||
+          !exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) ||
+          get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role != 'teacher'
+        )
+        && (
           (incoming().targetRole == 'teacher' && incoming().accessCode == activeTeacherCode()) ||
           (incoming().targetRole == 'admin' && incoming().accessCode == activeAdminCode())
         );
@@ -334,6 +341,11 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['targetRole', 'accessCode', 'updatedAt'])
+        && (
+          incoming().targetRole != 'admin' ||
+          !exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) ||
+          get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role != 'teacher'
+        )
         && (
           (incoming().targetRole == 'teacher' && incoming().accessCode == activeTeacherCode()) ||
           (incoming().targetRole == 'admin' && incoming().accessCode == activeAdminCode())
@@ -349,6 +361,7 @@ service cloud.firestore {
         && isValidEmailId(facultyEmail)
         && isValidAuthorizedFaculty(incoming())
         && incoming().email == facultyEmail
+        && incoming().role == 'teacher'
         && incoming().addedBy == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
@@ -357,6 +370,7 @@ service cloud.firestore {
         && isValidEmailId(facultyEmail)
         && isValidAuthorizedFaculty(incoming())
         && incoming().email == existing().email
+        && incoming().role == 'teacher'
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'fullName', 'addedBy', 'updatedAt']);
@@ -404,11 +418,12 @@ service cloud.firestore {
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
               'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
-              'lockedOut', 'lockReason', 'activeGame', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
+              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
             ])
           ) ||
           (
             isOwner(userId) &&
+            existing().role != 'teacher' &&
             (
               (incoming().role == 'teacher' && isAuthorizedTeacher()) ||
               (incoming().role == 'admin' && isAdmin())
@@ -419,7 +434,7 @@ service cloud.firestore {
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
               'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
-              'lockedOut', 'lockReason', 'activeGame', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
+              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
             ])
           ) ||
           (
@@ -428,10 +443,18 @@ service cloud.firestore {
             isTeacher()
           ) ||
           (
+            incoming().diff(existing()).affectedKeys().hasOnly(['section', 'updatedAt']) &&
+            existing().role == 'student' &&
+            isTeacher()
+          ) ||
+          (
             incoming().diff(existing()).affectedKeys().hasOnly(['totalScore', 'coins', 'petXp', 'petLevel', 'updatedAt']) &&
             isTeacher()
           ) ||
-          isAdmin()
+          (
+            isAdmin() &&
+            (existing().role != 'teacher' || incoming().role != 'admin' || isPrimaryAdmin())
+          )
         );
 
       allow delete: if isAdmin() && isValidId(userId);

@@ -13,6 +13,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidEmailId(email) {
+      return email is string && email.size() >= 3 && email.size() <= 120 && email.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -25,23 +29,108 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.email_verified == true;
     }
 
+    function hasVerifiedEmail() {
+      return isSignedIn() && 'email' in request.auth.token && request.auth.token.email is string;
+    }
+
+    function isPrimaryAdmin() {
+      return hasVerifiedEmail() && request.auth.token.email.lower() == 'maxsison2@gmail.com';
+    }
+
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function activeTeacherCode() {
+      return exists(/databases/$(database)/documents/config/accessCodes)
+        ? get(/databases/$(database)/documents/config/accessCodes).data.teacherCode
+        : 'SLA-TEACH-2026';
+    }
+
+    function activeAdminCode() {
+      return exists(/databases/$(database)/documents/config/accessCodes)
+        ? get(/databases/$(database)/documents/config/accessCodes).data.adminCode
+        : 'SLA-ADMIN-2026';
+    }
+
+    function hasClaimedRole(uid, requiredRole) {
+      return exists(/databases/$(database)/documents/roleClaims/$(uid)) &&
+        get(/databases/$(database)/documents/roleClaims/$(uid)).data.targetRole == requiredRole &&
+        (
+          (requiredRole == 'admin' && get(/databases/$(database)/documents/roleClaims/$(uid)).data.accessCode == activeAdminCode()) ||
+          (requiredRole == 'teacher' && get(/databases/$(database)/documents/roleClaims/$(uid)).data.accessCode == activeTeacherCode())
+        );
+    }
+
+    function hasClaimedAnyFacultyRole(uid) {
+      return exists(/databases/$(database)/documents/roleClaims/$(uid)) && (
+        (
+          get(/databases/$(database)/documents/roleClaims/$(uid)).data.targetRole == 'admin' &&
+          get(/databases/$(database)/documents/roleClaims/$(uid)).data.accessCode == activeAdminCode()
+        ) ||
+        (
+          get(/databases/$(database)/documents/roleClaims/$(uid)).data.targetRole == 'teacher' &&
+          get(/databases/$(database)/documents/roleClaims/$(uid)).data.accessCode == activeTeacherCode()
+        )
+      );
+    }
+
+    function isAuthorizedAdmin() {
+      return hasVerifiedEmail() &&
+        exists(/databases/$(database)/documents/authorizedFaculty/$(request.auth.token.email.lower())) &&
+        get(/databases/$(database)/documents/authorizedFaculty/$(request.auth.token.email.lower())).data.role == 'admin';
+    }
+
+    function isConfigAdmin() {
+      return isSignedIn() && (
+        isPrimaryAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        isAuthorizedAdmin() ||
+        (
+          exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
     function isAdmin() {
       return isSignedIn() && (
-        request.auth.token.email == 'maxsison2@gmail.com' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        isPrimaryAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        isAuthorizedAdmin() ||
+        hasClaimedRole(request.auth.uid, 'admin')
+      );
+    }
+
+    function isAuthorizedTeacher() {
+      return isSignedIn() && (
+        isPrimaryAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (
+          hasVerifiedEmail() &&
+          exists(/databases/$(database)/documents/authorizedFaculty/$(request.auth.token.email.lower())) &&
+          get(/databases/$(database)/documents/authorizedFaculty/$(request.auth.token.email.lower())).data.role in ['teacher', 'admin']
+        ) ||
+        hasClaimedAnyFacultyRole(request.auth.uid)
       );
     }
 
     function isTeacher() {
-      return isAdmin() || (
+      return (
         isSignedIn() &&
         exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role == 'teacher'
-      );
+        get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role in ['teacher', 'admin']
+      ) || isAuthorizedTeacher();
+    }
+
+    function isValidPhotoUrl(url) {
+      return url is string
+        && url.size() <= 40000
+        && (
+          url == '' ||
+          url.matches('^data:image/(jpeg|png|webp);base64,.*') ||
+          url.matches('^https://[a-zA-Z0-9._-]+googleusercontent\\.com/.*')
+        );
     }
 
     // --- Validation Blueprints ---
@@ -58,11 +147,11 @@ service cloud.firestore {
         'coins', 'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
         'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore', 'gamesPlayed',
         'correctAnswers', 'totalAnswers', 'isSleeping', 'lockedOut', 'lockReason',
-        'activeGame', 'createdAt', 'updatedAt'
+        'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'createdAt', 'updatedAt'
       ])
       && isValidId(data.uid)
       && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
-      && data.role in ['student', 'teacher']
+      && data.role in ['student', 'teacher', 'admin']
       && data.petSpecies in ['cat', 'dog', 'bunny', 'turtle', 'hamster', 'penguin']
       && data.petName is string && data.petName.size() >= 1 && data.petName.size() <= 30
       && data.petLevel is int && data.petLevel >= 1 && data.petLevel <= 999
@@ -86,6 +175,10 @@ service cloud.firestore {
       && data.lockedOut is bool
       && data.lockReason is string && data.lockReason.size() <= 140
       && data.activeGame is string && data.activeGame.size() <= 60
+      && (!('section' in data) || (data.section is string && data.section.size() <= 40))
+      && (!('photoUrl' in data) || isValidPhotoUrl(data.photoUrl))
+      && (!('isOnline' in data) || data.isOnline is bool)
+      && (!('lastSeenAt' in data) || data.lastSeenAt is timestamp)
       && data.createdAt is timestamp
       && data.updatedAt is timestamp;
     }
@@ -150,10 +243,6 @@ service cloud.firestore {
       && data.createdAt is timestamp;
     }
 
-    function isValidScoreCounts(data) {
-      return data.correctCount >= 0 && data.correctCount <= 500;
-    }
-
     function isValidAntiCheatAlert(data) {
       return data.keys().hasAll([
         'id', 'studentId', 'studentName', 'petName', 'gameId', 'gameTitle',
@@ -177,6 +266,37 @@ service cloud.firestore {
       && data.updatedAt is timestamp;
     }
 
+    function isValidAuthorizedFaculty(data) {
+      return data.keys().hasAll(['email', 'role', 'fullName', 'addedBy', 'createdAt', 'updatedAt'])
+      && data.keys().hasOnly(['email', 'role', 'fullName', 'addedBy', 'createdAt', 'updatedAt'])
+      && isValidEmailId(data.email)
+      && data.role in ['teacher', 'admin']
+      && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 60
+      && isValidId(data.addedBy)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidAccessCodes(data) {
+      return data.keys().hasAll(['teacherCode', 'adminCode', 'updatedBy', 'updatedAt'])
+      && data.keys().hasOnly(['teacherCode', 'adminCode', 'updatedBy', 'updatedAt'])
+      && data.teacherCode is string && data.teacherCode.size() >= 4 && data.teacherCode.size() <= 40
+      && data.adminCode is string && data.adminCode.size() >= 4 && data.adminCode.size() <= 40
+      && data.teacherCode != data.adminCode
+      && isValidId(data.updatedBy)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidRoleClaim(data) {
+      return data.keys().hasAll(['uid', 'targetRole', 'accessCode', 'createdAt', 'updatedAt'])
+      && data.keys().hasOnly(['uid', 'targetRole', 'accessCode', 'createdAt', 'updatedAt'])
+      && isValidId(data.uid)
+      && data.targetRole in ['teacher', 'admin']
+      && data.accessCode is string && data.accessCode.size() >= 4 && data.accessCode.size() <= 40
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
     match /test/connection {
       allow get: if true;
@@ -187,17 +307,95 @@ service cloud.firestore {
       allow list, create, update, delete: if false;
     }
 
+    match /config/{configId} {
+      allow get: if isConfigAdmin() && configId == 'accessCodes';
+      allow create, update: if isConfigAdmin()
+        && configId == 'accessCodes'
+        && isValidAccessCodes(incoming())
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow list, delete: if false;
+    }
+
+    match /roleClaims/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidRoleClaim(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          incoming().targetRole != 'admin' ||
+          !exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) ||
+          get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role != 'teacher'
+        )
+        && (
+          (incoming().targetRole == 'teacher' && incoming().accessCode == activeTeacherCode()) ||
+          (incoming().targetRole == 'admin' && incoming().accessCode == activeAdminCode())
+        );
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidRoleClaim(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['targetRole', 'accessCode', 'updatedAt'])
+        && (
+          incoming().targetRole != 'admin' ||
+          !exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) ||
+          get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.role != 'teacher'
+        )
+        && (
+          (incoming().targetRole == 'teacher' && incoming().accessCode == activeTeacherCode()) ||
+          (incoming().targetRole == 'admin' && incoming().accessCode == activeAdminCode())
+        );
+      allow list, delete: if false;
+    }
+
+    match /authorizedFaculty/{facultyEmail} {
+      allow get: if isSignedIn() && isValidEmailId(facultyEmail) && (isAdmin() || facultyEmail == request.auth.token.email.lower());
+      allow list: if isAdmin() && resource.data.role in ['teacher', 'admin'];
+
+      allow create: if isAdmin()
+        && isValidEmailId(facultyEmail)
+        && isValidAuthorizedFaculty(incoming())
+        && incoming().email == facultyEmail
+        && incoming().role == 'teacher'
+        && incoming().addedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidEmailId(facultyEmail)
+        && isValidAuthorizedFaculty(incoming())
+        && incoming().email == existing().email
+        && incoming().role == 'teacher'
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'fullName', 'addedBy', 'updatedAt']);
+
+      allow delete: if isAdmin() && isValidEmailId(facultyEmail);
+    }
+
     match /publicProfiles/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && resource.data.role in ['student', 'teacher'];
+      allow list: if isSignedIn() && resource.data.role in ['student', 'teacher', 'admin'];
 
+      // Students can ONLY create student profiles; teacher/admin requires Admin authorization OR verified secret code claim
       allow create: if isOwner(userId)
         && isValidId(userId)
         && isValidPublicProfile(incoming())
         && incoming().uid == request.auth.uid
         && incoming().lockedOut == false
+        && (!('lastSeenAt' in incoming()) || incoming().lastSeenAt == request.time)
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (
+          incoming().role == 'student' ||
+          (incoming().role == 'teacher' && isAuthorizedTeacher()) ||
+          (incoming().role == 'admin' && isAdmin())
+        );
 
       allow update: if isSignedIn()
         && isValidId(userId)
@@ -206,31 +404,56 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          isAdmin() ||
-          // Action: Teacher unlocks a locked student
-          (
-            isTeacher() &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['lockedOut', 'lockReason', 'updatedAt']) &&
-            incoming().lockedOut == false
-          ) ||
-          // Action: Teacher awards recitation points (e.g., Catch the Duck / On the Run)
-          (
-            isTeacher() &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['totalScore', 'coins', 'petXp', 'petLevel', 'updatedAt'])
-          ) ||
-          // Action: Owner updates pet care, customization, game progress, or triggers anti-cheat self-lock
-          // CRITICAL: Owner CANNOT unlock themselves if lockedOut is already true!
+          !('lastSeenAt' in incoming()) ||
+          incoming().lastSeenAt == request.time ||
+          ('lastSeenAt' in existing() && incoming().lastSeenAt == existing().lastSeenAt)
+        )
+        && (
           (
             isOwner(userId) &&
             incoming().role == existing().role &&
             (existing().lockedOut == false || incoming().lockedOut == true) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
+              'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
               'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
-              'lockedOut', 'lockReason', 'activeGame', 'updatedAt'
+              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
             ])
+          ) ||
+          (
+            isOwner(userId) &&
+            existing().role != 'teacher' &&
+            (
+              (incoming().role == 'teacher' && isAuthorizedTeacher()) ||
+              (incoming().role == 'admin' && isAdmin())
+            ) &&
+            (existing().lockedOut == false || incoming().lockedOut == true) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
+              'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
+              'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
+              'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
+              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
+            ])
+          ) ||
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['lockedOut', 'lockReason', 'updatedAt']) &&
+            incoming().lockedOut == false &&
+            isTeacher()
+          ) ||
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['section', 'updatedAt']) &&
+            existing().role == 'student' &&
+            isTeacher()
+          ) ||
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['totalScore', 'coins', 'petXp', 'petLevel', 'updatedAt']) &&
+            isTeacher()
+          ) ||
+          (
+            isAdmin() &&
+            (existing().role != 'teacher' || incoming().role != 'admin' || isPrimaryAdmin())
           )
         );
 
@@ -281,17 +504,17 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          isAdmin() ||
           (
-            isTeacher() &&
             existing().teacherId == request.auth.uid &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'title', 'subject', 'description', 'sourceType', 'questions', 'isPublished', 'updatedAt'
-            ])
-          )
+            ]) &&
+            isTeacher()
+          ) ||
+          isAdmin()
         );
 
-      allow delete: if isSignedIn() && isValidId(deckId) && (isAdmin() || (isTeacher() && existing().teacherId == request.auth.uid));
+      allow delete: if isSignedIn() && isValidId(deckId) && ((existing().teacherId == request.auth.uid && isTeacher()) || isAdmin());
     }
 
     match /scoreRecords/{recordId} {
@@ -310,7 +533,7 @@ service cloud.firestore {
 
     match /antiCheatAlerts/{alertId} {
       allow get: if isSignedIn() && isValidId(alertId);
-      allow list: if isSignedIn() && resource.data.status in ['locked', 'allowed'];
+      allow list: if isSignedIn() && (resource.data.studentId == request.auth.uid || resource.data.status in ['locked', 'allowed']);
 
       allow create: if isSignedIn()
         && isValidId(alertId)
@@ -331,12 +554,12 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && existing().status == 'locked'
         && (
-          isAdmin() ||
           (
-            isTeacher() &&
             incoming().status == 'allowed' &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolvedBy', 'updatedAt'])
-          )
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolvedBy', 'updatedAt']) &&
+            isTeacher()
+          ) ||
+          isAdmin()
         );
 
       allow delete: if isAdmin() && isValidId(alertId);

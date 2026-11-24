@@ -30,6 +30,7 @@
         "lockedOut": { "type": "boolean" },
         "lockReason": { "type": "string", "maxLength": 140 },
         "activeGame": { "type": "string", "maxLength": 60 },
+        "section": { "type": "string", "maxLength": 40, "description": "Assigned class section for students and teaching room for teachers." },
         "photoUrl": { "type": "string", "maxLength": 40000, "description": "Optional compressed student/faculty profile photo data URL or Google avatar URL." },
         "isOnline": { "type": "boolean", "description": "Live session online flag updated on login, heartbeat, and sign out." },
         "lastSeenAt": { "type": "string", "format": "date-time", "description": "Server timestamp of the user's most recent active classroom heartbeat." },

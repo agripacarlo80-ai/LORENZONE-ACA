@@ -889,7 +889,12 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
   onAwardStudent,
 }) => {
   const studentsPool = useMemo(() => {
-    const list = allProfiles.filter((p) => p.role === 'student');
+    const allStudents = allProfiles.filter((p) => p.role === 'student');
+    const teacherSection = profile.role === 'teacher' ? profile.section?.trim() : '';
+    const sectionStudents = teacherSection
+      ? allStudents.filter((p) => (p.section || '').trim() === teacherSection)
+      : [];
+    const list = sectionStudents.length >= 2 ? sectionStudents : allStudents;
     if (list.length >= 2) return list;
     return [
       profile,

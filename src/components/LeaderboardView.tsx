@@ -21,6 +21,7 @@ import {
   UserPrivateInfo,
   UserRole,
 } from '../types';
+import { SLA_SECTIONS } from '../data/defaultDecks';
 import { downloadLeaderboardCsv } from '../lib/pptxParser';
 import { getStudentPresence } from '../lib/presence';
 import { PetAvatar } from './PetAvatar';
@@ -32,6 +33,7 @@ interface LeaderboardViewProps {
   alerts: AntiCheatAlert[];
   currentUid: string;
   currentRole: UserRole;
+  currentSection?: string;
 }
 
 export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
@@ -40,7 +42,11 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   alerts,
   currentUid,
   currentRole,
+  currentSection,
 }) => {
+  const [sectionFilter, setSectionFilter] = useState<string>(
+    currentRole === 'teacher' && currentSection ? currentSection : 'All'
+  );
   const [subjectFilter, setSubjectFilter] = useState<string>('All');
   const [gameFilter, setGameFilter] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -100,15 +106,30 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
     return Array.from(set);
   }, [records]);
 
+  const sections = useMemo(() => {
+    const set = new Set<string>(['All', ...SLA_SECTIONS]);
+    profiles.forEach((p) => {
+      if (p.section && p.section.trim()) {
+        set.add(p.section.trim());
+      }
+    });
+    if (currentSection && currentSection.trim()) {
+      set.add(currentSection.trim());
+    }
+    return Array.from(set);
+  }, [profiles, currentSection]);
+
   const rankedStudents = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const students = profiles.filter((p) => {
       if (p.role !== 'student') return false;
+      if (sectionFilter !== 'All' && (p.section || '') !== sectionFilter) return false;
       if (!q) return true;
       return (
         p.displayName.toLowerCase().includes(q) ||
         p.petName.toLowerCase().includes(q) ||
-        p.petSpecies.toLowerCase().includes(q)
+        p.petSpecies.toLowerCase().includes(q) ||
+        (p.section || '').toLowerCase().includes(q)
       );
     });
 
@@ -130,7 +151,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         filteredScore: scoreByStudent.get(s.uid) || 0,
       }))
       .sort((a, b) => b.filteredScore - a.filteredScore);
-  }, [profiles, records, subjectFilter, gameFilter, searchQuery]);
+  }, [profiles, records, sectionFilter, subjectFilter, gameFilter, searchQuery]);
 
   const topThree = rankedStudents.slice(0, 3);
 
@@ -181,6 +202,19 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
           </div>
 
           <select
+            value={sectionFilter}
+            onChange={(e) => setSectionFilter(e.target.value)}
+            aria-label="Filter by section"
+            className="px-3.5 py-2 rounded-xl border border-[#D8D0BC] text-xs font-medium bg-white"
+          >
+            {sections.map((sec) => (
+              <option key={sec} value={sec}>
+                {sec === 'All' ? 'Section: All' : sec}
+              </option>
+            ))}
+          </select>
+
+          <select
             value={subjectFilter}
             onChange={(e) => setSubjectFilter(e.target.value)}
             aria-label="Filter by subject"
@@ -210,7 +244,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
             type="button"
             onClick={() => {
               soundFx.playClick();
-              downloadLeaderboardCsv(profiles, records);
+              downloadLeaderboardCsv(rankedStudents, records);
             }}
             className="px-4 py-2.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
@@ -374,10 +408,15 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                             size={34}
                           />
                         )}
-                        <span>
-                          {student.displayName}{' '}
-                          {isMe && <span className="text-xs text-[#EA7A26]">(You)</span>}
-                        </span>
+                        <div>
+                          <span>
+                            {student.displayName}{' '}
+                            {isMe && <span className="text-xs text-[#EA7A26]">(You)</span>}
+                          </span>
+                          {student.section && (
+                            <p className="text-[11px] font-normal text-[#4D6354]">{student.section}</p>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td className="py-3 pr-4 text-[#4D6354] capitalize">
@@ -464,8 +503,8 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                       {loadingPrivateInfo
                         ? 'Loading section & account details...'
                         : privateInfo
-                          ? `${privateInfo.section || 'SLA General'} · ${privateInfo.email}`
-                          : 'Section details unavailable'}
+                          ? `${selectedStudent.section || privateInfo.section || 'SLA General'} · ${privateInfo.email}`
+                          : selectedStudent.section || 'Section details unavailable'}
                     </p>
                     <span
                       className={`inline-flex items-center gap-1.5 text-xs font-bold ${

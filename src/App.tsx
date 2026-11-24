@@ -194,6 +194,36 @@ function LorenzoneApp() {
     }
   }, [user, myProfile, authzChecked, authorizedRole]);
 
+  // Backfill `section` onto PublicProfile once for legacy accounts created before section classroom rooms
+  useEffect(() => {
+    if (!user || !myProfile || (myProfile.section && myProfile.section.trim())) return;
+    let cancelled = false;
+    const backfillSection = async () => {
+      try {
+        const privSnap = await getDoc(doc(db, 'users', user.uid, 'private', 'info'));
+        const privSection =
+          privSnap.exists() && typeof privSnap.data().section === 'string'
+            ? privSnap.data().section.trim()
+            : '';
+        const fallback =
+          myProfile.role === 'admin' ? 'SLA Administration' : 'Grade 10 - St. Lorenzo';
+        const resolved = (privSection || fallback).slice(0, 40);
+        if (!cancelled) {
+          await updateDoc(doc(db, 'publicProfiles', user.uid), {
+            section: resolved,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch {
+        // Ignore backfill errors
+      }
+    };
+    void backfillSection();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, myProfile]);
+
   // Attach classroom listeners once user profile is established
   useEffect(() => {
     if (!authReady || !user || !myProfile) return;
@@ -421,6 +451,7 @@ function LorenzoneApp() {
       lockedOut: false,
       lockReason: '',
       activeGame: 'Lobby',
+      section: data.section,
       photoUrl: data.photoUrl || '',
       isOnline: true,
       lastSeenAt: serverTimestamp(),
@@ -631,7 +662,7 @@ function LorenzoneApp() {
   }, []);
 
   const handleAddAuthorizedFaculty = useCallback(
-    async (email: string, fullName: string, role: 'teacher' | 'admin') => {
+    async (email: string, fullName: string, role: 'teacher') => {
       if (!user) return;
       const cleanEmail = email.trim().toLowerCase();
       try {
@@ -659,7 +690,10 @@ function LorenzoneApp() {
     }
   }, []);
 
-  const handleUpdateUserRole = useCallback(async (uid: string, nextRole: UserRole) => {
+  const handleUpdateUserRole = useCallback(async (uid: string, nextRole: 'student' | 'teacher') => {
+    if (user && uid === user.uid) {
+      throw new Error('You cannot change your own active Admin role here.');
+    }
     try {
       await updateDoc(doc(db, 'publicProfiles', uid), {
         role: nextRole,
@@ -668,11 +702,52 @@ function LorenzoneApp() {
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `publicProfiles/${uid}`);
     }
+  }, [user]);
+
+  const handleUpdateOwnSection = useCallback(
+    async (nextSection: string) => {
+      if (!user) return;
+      const cleanSec = nextSection.trim().slice(0, 40);
+      if (!cleanSec) return;
+      try {
+        await updateDoc(doc(db, 'publicProfiles', user.uid), {
+          section: cleanSec,
+          updatedAt: serverTimestamp(),
+        });
+        const privRef = doc(db, 'users', user.uid, 'private', 'info');
+        const privSnap = await getDoc(privRef);
+        if (privSnap.exists()) {
+          await updateDoc(privRef, {
+            section: cleanSec,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `publicProfiles/${user.uid}`);
+      }
+    },
+    [user]
+  );
+
+  const handleAssignStudentSection = useCallback(async (studentUid: string, nextSection: string) => {
+    const cleanSec = nextSection.trim().slice(0, 40);
+    if (!cleanSec) return;
+    try {
+      await updateDoc(doc(db, 'publicProfiles', studentUid), {
+        section: cleanSec,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `publicProfiles/${studentUid}`);
+    }
   }, []);
 
   const handleClaimRoleWithCode = useCallback(
     async (targetRole: 'teacher' | 'admin', accessCode: string) => {
       if (!user) throw new Error('Please sign in with Google first.');
+      if (myProfile?.role === 'teacher' && targetRole === 'admin') {
+        throw new Error('Teachers cannot upgrade to Admin. Use an Admin account with the Admin Secret Code.');
+      }
       const trimmedCode = accessCode.trim();
       const claimRef = doc(db, 'roleClaims', user.uid);
       try {
@@ -706,6 +781,9 @@ function LorenzoneApp() {
             uniformStyle: 'faculty_blazer',
             outfit:
               myProfile.outfit === 'outfit_sla_polo' ? 'outfit_teacher_blazer' : myProfile.outfit,
+            section:
+              myProfile.section ||
+              (targetRole === 'admin' ? 'SLA Administration' : 'Grade 10 - St. Lorenzo'),
             updatedAt: serverTimestamp(),
           });
         } catch (err) {
@@ -719,10 +797,15 @@ function LorenzoneApp() {
   const handleUpdateAccessCodes = useCallback(
     async (teacherCode: string, adminCode: string) => {
       if (!user) return;
+      const cleanTeach = teacherCode.trim();
+      const cleanAdmin = adminCode.trim();
+      if (cleanTeach === cleanAdmin) {
+        throw new Error('Teacher Secret Code and Admin Secret Code must be different.');
+      }
       try {
         await setDoc(doc(db, 'config', 'accessCodes'), {
-          teacherCode: teacherCode.trim(),
-          adminCode: adminCode.trim(),
+          teacherCode: cleanTeach,
+          adminCode: cleanAdmin,
           updatedBy: user.uid,
           updatedAt: serverTimestamp(),
         });
@@ -744,11 +827,23 @@ function LorenzoneApp() {
     () => [...customDecks.filter((d) => d.isPublished), ...BUILTIN_DECKS],
     [customDecks]
   );
-  const lockedAlerts = useMemo(() => alerts.filter((a) => a.status === 'locked'), [alerts]);
+  const lockedAlerts = useMemo(() => {
+    const activeLocked = alerts.filter((a) => a.status === 'locked');
+    if (myProfile?.role === 'teacher' && myProfile.section?.trim()) {
+      const teacherSec = myProfile.section.trim();
+      const myStudentIds = new Set(
+        allProfiles
+          .filter((p) => p.role === 'student' && (p.section || '').trim() === teacherSec)
+          .map((p) => p.uid)
+      );
+      return activeLocked.filter((a) => myStudentIds.has(a.studentId));
+    }
+    return activeLocked;
+  }, [alerts, allProfiles, myProfile?.role, myProfile?.section]);
   const lockedAlertCount = lockedAlerts.length;
   const prevLockedCountRef = useRef(0);
 
-  // Global audible Teacher/Admin siren across all tabs when any student triggers the Cheating Detector
+  // Global audible Teacher/Admin siren across all tabs when a student in view triggers the Cheating Detector
   useEffect(() => {
     const isFaculty = myProfile?.role === 'teacher' || myProfile?.role === 'admin';
     if (isFaculty && lockedAlertCount > prevLockedCountRef.current) {
@@ -921,6 +1016,7 @@ function LorenzoneApp() {
           theme={theme}
           onChangeTheme={setTheme}
           role={myProfile.role}
+          section={myProfile.section}
           lockedAlertCount={lockedAlertCount}
         />
 
@@ -993,6 +1089,7 @@ function LorenzoneApp() {
             alerts={alerts}
             currentUid={myProfile.uid}
             currentRole={myProfile.role}
+            currentSection={myProfile.section}
           />
         )}
 
@@ -1015,6 +1112,8 @@ function LorenzoneApp() {
             onAddAuthorizedFaculty={handleAddAuthorizedFaculty}
             onRemoveAuthorizedFaculty={handleRemoveAuthorizedFaculty}
             onUpdateUserRole={handleUpdateUserRole}
+            onUpdateOwnSection={handleUpdateOwnSection}
+            onAssignStudentSection={handleAssignStudentSection}
             accessCodes={accessCodes}
             onUpdateAccessCodes={handleUpdateAccessCodes}
           />
@@ -1035,6 +1134,7 @@ function LorenzoneApp() {
           onToggleMute={handleToggleMute}
           theme={theme}
           onChangeTheme={setTheme}
+          onUpdateSection={handleUpdateOwnSection}
           onClaimRoleWithCode={handleClaimRoleWithCode}
           onSignOut={async () => {
             await handleFullSignOut();

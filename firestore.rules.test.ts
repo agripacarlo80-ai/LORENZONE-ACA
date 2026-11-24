@@ -95,4 +95,13 @@ export const dirtyDozenPayloads = [
     path: '/quizDecks/deck_owned_by_teacher_1',
     expected: 'PERMISSION_DENIED',
   },
+  {
+    name: '13. Teacher-to-Admin Role Escalation Blocked',
+    auth: { uid: 'teacher_1', token: { email_verified: true } },
+    operation: 'update',
+    path: '/publicProfiles/teacher_1',
+    existingData: { role: 'teacher' },
+    payload: { role: 'admin' },
+    expected: 'PERMISSION_DENIED',
+  },
 ];

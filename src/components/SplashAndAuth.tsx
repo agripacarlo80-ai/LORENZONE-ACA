@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ShieldCheck, ArrowRight, GraduationCap, Users, Check, KeyRound, ShieldAlert, Camera, Trash2 } from 'lucide-react';
-import { PET_COLORS, PET_SPECIES_INFO } from '../data/defaultDecks';
+import { PET_COLORS, PET_SPECIES_INFO, SLA_SECTIONS } from '../data/defaultDecks';
 import { PetSpecies, UserRole } from '../types';
 import { PetAvatar } from './PetAvatar';
 import { soundFx } from '../lib/sound';
@@ -250,8 +250,9 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(defaultName || 'SLA Learner');
   const [section, setSection] = useState(
-    initialRole !== 'student' ? 'SLA Faculty & Administration' : 'Grade 10 - St. Lorenzo'
+    initialRole === 'admin' ? 'SLA Administration' : SLA_SECTIONS[6]
   );
+  const [useCustomSection, setUseCustomSection] = useState(false);
   const [photoUrl, setPhotoUrl] = useState(defaultPhotoUrl);
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [petSpecies, setPetSpecies] = useState<PetSpecies>('cat');
@@ -384,7 +385,10 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
                     soundFx.playClick();
                     setRole('student');
                     setOutfit('outfit_sla_polo');
-                    setSection('Grade 10 - St. Lorenzo');
+                    if (!SLA_SECTIONS.includes(section) && section === 'SLA Administration') {
+                      setSection(SLA_SECTIONS[6]);
+                      setUseCustomSection(false);
+                    }
                     setCodeError(null);
                   }}
                   className={`p-3 rounded-xl border text-left transition-colors cursor-pointer flex items-center gap-2.5 ${
@@ -406,7 +410,10 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
                     soundFx.playClick();
                     setRole('teacher');
                     setOutfit('outfit_teacher_blazer');
-                    setSection('SLA Faculty');
+                    if (section === 'SLA Administration' || section === 'SLA Faculty & Administration') {
+                      setSection(SLA_SECTIONS[6]);
+                      setUseCustomSection(false);
+                    }
                     setCodeError(null);
                   }}
                   className={`p-3 rounded-xl border text-left transition-colors cursor-pointer flex items-center gap-2.5 ${
@@ -418,7 +425,7 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
                   <Users className="w-5 h-5 shrink-0" />
                   <div>
                     <p className="text-sm font-bold">Teacher</p>
-                    <p className="text-[11px] text-[#4D6354]">Quizzes &amp; Monitor</p>
+                    <p className="text-[11px] text-[#4D6354]">Class room &amp; quizzes</p>
                   </div>
                 </button>
 
@@ -429,6 +436,7 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
                     setRole('admin');
                     setOutfit('outfit_teacher_blazer');
                     setSection('SLA Administration');
+                    setUseCustomSection(false);
                     setCodeError(null);
                   }}
                   className={`p-3 rounded-xl border text-left transition-colors cursor-pointer flex items-center gap-2.5 ${
@@ -500,15 +508,61 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
               </div>
               <div>
                 <label className="block text-xs font-semibold text-[#172A1E] mb-1.5">
-                  {role === 'teacher' || role === 'admin' ? 'Department / Advisory' : 'Grade & Section'}
+                  {role === 'teacher'
+                    ? 'Section / Class You Will Teach'
+                    : role === 'admin'
+                      ? 'Department / Advisory'
+                      : 'Grade & Section'}
                 </label>
-                <input
-                  type="text"
-                  maxLength={40}
-                  value={section}
-                  onChange={(e) => setSection(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm focus:outline-none focus:border-[#1E5B3A]"
-                />
+                {role === 'admin' ? (
+                  <input
+                    type="text"
+                    maxLength={40}
+                    value={section}
+                    onChange={(e) => setSection(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm focus:outline-none focus:border-[#1E5B3A]"
+                  />
+                ) : (
+                  <div className="space-y-2">
+                    <select
+                      value={useCustomSection ? '__custom__' : SLA_SECTIONS.includes(section) ? section : '__custom__'}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '__custom__') {
+                          setUseCustomSection(true);
+                          if (SLA_SECTIONS.includes(section)) setSection('');
+                        } else {
+                          setUseCustomSection(false);
+                          setSection(val);
+                        }
+                      }}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm bg-white focus:outline-none focus:border-[#1E5B3A]"
+                    >
+                      {SLA_SECTIONS.map((sec) => (
+                        <option key={sec} value={sec}>
+                          {sec}
+                        </option>
+                      ))}
+                      <option value="__custom__">Other / Custom Section...</option>
+                    </select>
+                    {(useCustomSection || !SLA_SECTIONS.includes(section)) && (
+                      <input
+                        type="text"
+                        required
+                        maxLength={40}
+                        placeholder="Type custom grade & section (e.g., Grade 10 - Rizal)"
+                        value={section}
+                        onChange={(e) => setSection(e.target.value)}
+                        className="w-full px-3.5 py-2 rounded-xl border border-[#D8D0BC] text-sm focus:outline-none focus:border-[#1E5B3A]"
+                      />
+                    )}
+                    {role === 'teacher' && (
+                      <p className="text-[11px] text-[#4D6354]">
+                        Your Teacher Monitor will open as an individual room for students in this section.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

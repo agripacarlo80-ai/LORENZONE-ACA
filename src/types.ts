@@ -61,6 +61,7 @@ export interface PublicProfile {
   lockedOut: boolean;
   lockReason: string;
   activeGame: string;
+  section?: string;
   photoUrl?: string;
   isOnline?: boolean;
   lastSeenAt?: unknown;

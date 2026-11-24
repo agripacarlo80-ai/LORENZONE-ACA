@@ -16,6 +16,7 @@ import {
   Play,
   KeyRound,
   Copy,
+  School,
 } from 'lucide-react';
 import {
   AntiCheatAlert,
@@ -27,6 +28,7 @@ import {
   ScoreRecord,
   UserRole,
 } from '../types';
+import { SLA_SECTIONS } from '../data/defaultDecks';
 import { downloadLeaderboardCsv, parsePlainTextSlides, parsePptxFile } from '../lib/pptxParser';
 import { getStudentPresence } from '../lib/presence';
 import { soundFx } from '../lib/sound';
@@ -47,9 +49,11 @@ interface TeacherMonitorProps {
   ) => Promise<void>;
   onDeleteDeck: (deckId: string) => Promise<void>;
   onLaunchTeacherGame: (gameId: GameId) => void;
-  onAddAuthorizedFaculty: (email: string, fullName: string, role: 'teacher' | 'admin') => Promise<void>;
+  onAddAuthorizedFaculty: (email: string, fullName: string, role: 'teacher') => Promise<void>;
   onRemoveAuthorizedFaculty: (email: string) => Promise<void>;
-  onUpdateUserRole: (uid: string, nextRole: UserRole) => Promise<void>;
+  onUpdateUserRole: (uid: string, nextRole: 'student' | 'teacher') => Promise<void>;
+  onUpdateOwnSection: (section: string) => Promise<void>;
+  onAssignStudentSection: (studentUid: string, section: string) => Promise<void>;
   accessCodes: { teacherCode: string; adminCode: string };
   onUpdateAccessCodes: (teacherCode: string, adminCode: string) => Promise<void>;
 }
@@ -71,6 +75,8 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   onAddAuthorizedFaculty,
   onRemoveAuthorizedFaculty,
   onUpdateUserRole,
+  onUpdateOwnSection,
+  onAssignStudentSection,
   accessCodes,
   onUpdateAccessCodes,
 }) => {
@@ -100,12 +106,22 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [pptxStatus, setPptxStatus] = useState<string | null>(null);
   const [pptxTextFallback, setPptxTextFallback] = useState('');
 
-  // Admin Faculty Access state
+  // Admin Faculty Access state (Teachers only — Teachers cannot become Admin)
   const [facultyEmail, setFacultyEmail] = useState('');
   const [facultyName, setFacultyName] = useState('');
-  const [facultyRole, setFacultyRole] = useState<'teacher' | 'admin'>('teacher');
   const [facultyFeedback, setFacultyFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [savingFaculty, setSavingFaculty] = useState(false);
+
+  // Teacher Classroom Room Selection state
+  const initialTeacherSection = teacherProfile.section?.trim() || SLA_SECTIONS[6];
+  const [teacherSectionInput, setTeacherSectionInput] = useState(initialTeacherSection);
+  const [useCustomTeacherSection, setUseCustomTeacherSection] = useState(
+    !SLA_SECTIONS.includes(initialTeacherSection)
+  );
+  const [savingRoom, setSavingRoom] = useState(false);
+  const [roomFeedback, setRoomFeedback] = useState<string | null>(null);
+  const [assigningUid, setAssigningUid] = useState<string | null>(null);
+  const [adminRoomFilter, setAdminRoomFilter] = useState<string>('ALL');
 
   // Admin Secret Access Codes state
   const [teacherCodeInput, setTeacherCodeInput] = useState(accessCodes.teacherCode);
@@ -125,9 +141,44 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     setAdminCodeInput(accessCodes.adminCode);
   }, [accessCodes.teacherCode, accessCodes.adminCode]);
 
+  useEffect(() => {
+    const nextSec = teacherProfile.section?.trim() || SLA_SECTIONS[6];
+    setTeacherSectionInput(nextSec);
+    setUseCustomTeacherSection(!SLA_SECTIONS.includes(nextSec));
+  }, [teacherProfile.section]);
+
   const isAdmin = teacherProfile.role === 'admin';
-  const lockedAlerts = alerts.filter((a) => a.status === 'locked');
-  const students = allProfiles.filter((p) => p.role === 'student');
+  const myTeachingSection = teacherProfile.section?.trim() || SLA_SECTIONS[6];
+  const allStudents = allProfiles.filter((p) => p.role === 'student');
+
+  const availableRoomSections = Array.from(
+    new Set([
+      ...SLA_SECTIONS,
+      ...allStudents.map((s) => (s.section || '').trim()).filter(Boolean),
+    ])
+  );
+
+  // Scoped Classroom Room:
+  // - Teachers see ONLY students enrolled in their chosen section (individual room).
+  // - Admins can inspect ALL classrooms or filter to any individual section room.
+  const activeRoomSection = isAdmin ? adminRoomFilter : myTeachingSection;
+  const students = isAdmin
+    ? adminRoomFilter === 'ALL'
+      ? allStudents
+      : adminRoomFilter === '__UNASSIGNED__'
+        ? allStudents.filter((s) => !(s.section || '').trim())
+        : allStudents.filter((s) => (s.section || '').trim() === adminRoomFilter)
+    : allStudents.filter((s) => (s.section || '').trim() === myTeachingSection);
+
+  const unassignedStudents = allStudents.filter((s) => !(s.section || '').trim());
+  const roomStudentIds = new Set(students.map((s) => s.uid));
+
+  const roomAlerts =
+    isAdmin && adminRoomFilter === 'ALL'
+      ? alerts
+      : alerts.filter((a) => roomStudentIds.has(a.studentId));
+  const lockedAlerts = roomAlerts.filter((a) => a.status === 'locked');
+
   const onlineCount = students.filter((st) => getStudentPresence(st, nowMs).isOnline).length;
   const offlineCount = students.length - onlineCount;
   const filteredStudents = students.filter((st) => {
@@ -410,48 +461,175 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
       )}
 
       {/* Teacher Monitor Navigation & Actions */}
-      <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold text-[#EA7A26]">San Lorenzo Academy Faculty Console</p>
-          <h2 className="text-2xl font-bold text-[#172A1E]">Teacher Monitor &amp; Quiz Studio</h2>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9]">
-            {[
-              { id: 'live', label: 'Class Monitor' },
-              { id: 'pptx', label: 'Import PPTX' },
-              { id: 'builder', label: 'Quiz Builder' },
-              ...(isAdmin ? [{ id: 'admin', label: 'Admin Access' }] : []),
-            ].map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => {
-                  soundFx.playClick();
-                  setTab(t.id as MonitorTab);
-                }}
-                className={`px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
-                  tab === t.id ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
+      <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold text-[#EA7A26]">
+              San Lorenzo Academy · {isAdmin ? 'Administrator Console' : `Classroom Room: ${myTeachingSection}`}
+            </p>
+            <h2 className="text-2xl font-bold text-[#172A1E]">
+              {isAdmin ? 'Faculty & Admin Control Center' : `${myTeachingSection} — Teacher Room`}
+            </h2>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              soundFx.playQuack();
-              onLaunchTeacherGame('catch_the_duck');
-            }}
-            className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-          >
-            <Play className="w-3.5 h-3.5" />
-            Host Catch the Duck
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9]">
+              {[
+                { id: 'live', label: isAdmin ? 'Classrooms' : 'My Classroom' },
+                { id: 'pptx', label: 'Import PPTX' },
+                { id: 'builder', label: 'Quiz Builder' },
+                ...(isAdmin ? [{ id: 'admin', label: 'Admin & Secret Codes' }] : []),
+              ].map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setTab(t.id as MonitorTab);
+                  }}
+                  className={`px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                    tab === t.id ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playQuack();
+                onLaunchTeacherGame('catch_the_duck');
+              }}
+              className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              <Play className="w-3.5 h-3.5" />
+              Host Catch the Duck
+            </button>
+          </div>
         </div>
+
+        {/* Section / Classroom Room Selector Bar */}
+        {!isAdmin ? (
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const cleanSec = teacherSectionInput.trim().slice(0, 40);
+              if (!cleanSec) return;
+              setSavingRoom(true);
+              setRoomFeedback(null);
+              try {
+                await onUpdateOwnSection(cleanSec);
+                soundFx.playCorrect();
+                setRoomFeedback(`Classroom room switched to "${cleanSec}".`);
+              } catch (err) {
+                soundFx.playWrong();
+                setRoomFeedback(err instanceof Error ? err.message : 'Unable to switch class section.');
+              } finally {
+                setSavingRoom(false);
+              }
+            }}
+            className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] flex flex-col md:flex-row md:items-center justify-between gap-3"
+          >
+            <div className="flex items-start gap-2.5">
+              <School className="w-5 h-5 text-[#1E5B3A] shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-bold text-[#172A1E]">
+                  Section You Are Teaching (Your Individual Classroom Room)
+                </p>
+                <p className="text-[11px] text-[#4D6354]">
+                  Select your assigned section to view and monitor only the students in your class.
+                </p>
+                {roomFeedback && (
+                  <p className="text-[11px] font-semibold text-[#1E5B3A] mt-1">{roomFeedback}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={
+                  useCustomTeacherSection
+                    ? '__custom__'
+                    : SLA_SECTIONS.includes(teacherSectionInput)
+                      ? teacherSectionInput
+                      : '__custom__'
+                }
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setRoomFeedback(null);
+                  if (val === '__custom__') {
+                    setUseCustomTeacherSection(true);
+                    if (SLA_SECTIONS.includes(teacherSectionInput)) setTeacherSectionInput('');
+                  } else {
+                    setUseCustomTeacherSection(false);
+                    setTeacherSectionInput(val);
+                  }
+                }}
+                aria-label="Choose section you teach"
+                className="px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs font-semibold text-[#172A1E]"
+              >
+                {SLA_SECTIONS.map((sec) => (
+                  <option key={sec} value={sec}>
+                    {sec}
+                  </option>
+                ))}
+                <option value="__custom__">Other / Custom Section...</option>
+              </select>
+
+              {(useCustomTeacherSection || !SLA_SECTIONS.includes(teacherSectionInput)) && (
+                <input
+                  type="text"
+                  maxLength={40}
+                  required
+                  value={teacherSectionInput}
+                  onChange={(e) => setTeacherSectionInput(e.target.value)}
+                  placeholder="Custom section name..."
+                  className="px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs w-44"
+                />
+              )}
+
+              <button
+                type="submit"
+                disabled={savingRoom}
+                className="px-4 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-60 whitespace-nowrap"
+              >
+                {savingRoom ? 'Updating...' : 'Set My Class'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <School className="w-5 h-5 text-[#EA7A26] shrink-0" />
+              <div>
+                <p className="text-xs font-bold text-[#172A1E]">Inspect Classroom Room</p>
+                <p className="text-[11px] text-[#4D6354]">
+                  View all SLA classrooms together or choose a specific section room.
+                </p>
+              </div>
+            </div>
+            <select
+              value={adminRoomFilter}
+              onChange={(e) => setAdminRoomFilter(e.target.value)}
+              aria-label="Inspect classroom section"
+              className="px-3.5 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs font-semibold text-[#172A1E]"
+            >
+              <option value="ALL">All Classrooms ({allStudents.length} Students)</option>
+              {availableRoomSections.map((sec) => (
+                <option key={sec} value={sec}>
+                  Room: {sec} ({allStudents.filter((s) => (s.section || '').trim() === sec).length})
+                </option>
+              ))}
+              {unassignedStudents.length > 0 && (
+                <option value="__UNASSIGNED__">
+                  Unassigned / Legacy ({unassignedStudents.length})
+                </option>
+              )}
+            </select>
+          </div>
+        )}
       </div>
 
       {tab === 'live' && (
@@ -459,10 +637,12 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <h3 className="text-lg font-bold text-[#172A1E]">
-                Student Pet Progress &amp; Integrity Status
+                {isAdmin && activeRoomSection === 'ALL'
+                  ? 'All Students — Pet Progress & Integrity Status'
+                  : `${activeRoomSection === '__UNASSIGNED__' ? 'Unassigned Students' : activeRoomSection} — Student Roster (${students.length})`}
               </h3>
               <p className="text-xs text-[#4D6354]">
-                Track every student&apos;s live online/offline presence, pet companion level, quiz performance, and focus status.
+                Track every student in your classroom room: live online/offline presence, pet level, quiz performance, and anti-cheat focus status.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -501,12 +681,12 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                 type="button"
                 onClick={() => {
                   soundFx.playClick();
-                  downloadLeaderboardCsv(allProfiles, records);
+                  downloadLeaderboardCsv(students, records);
                 }}
                 className="px-4 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold flex items-center gap-2 cursor-pointer"
               >
                 <Download className="w-4 h-4" />
-                Export Class CSV
+                Export Room CSV
               </button>
             </div>
           </div>
@@ -514,8 +694,10 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
           {filteredStudents.length === 0 ? (
             <p className="text-sm text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
               {students.length === 0
-                ? 'No student accounts enrolled yet. Students who sign in with Google will appear here automatically.'
-                : `No ${presenceFilter} students right now.`}
+                ? isAdmin
+                  ? 'No student accounts in this filter yet.'
+                  : `No students enrolled in "${myTeachingSection}" yet. Students who pick "${myTeachingSection}" will appear in your room automatically.`
+                : `No ${presenceFilter} students right now in this classroom.`}
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -540,7 +722,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                         ? Math.round((st.correctAnswers / st.totalAnswers) * 100)
                         : 0;
                     const matchingAlert = lockedAlerts.find((a) => a.studentId === st.uid);
-                    const strikeCount = alerts.filter((a) => a.studentId === st.uid).length;
+                    const strikeCount = roomAlerts.filter((a) => a.studentId === st.uid).length;
                     const presence = getStudentPresence(st, nowMs);
 
                     return (
@@ -571,7 +753,12 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                                 }`}
                               />
                             </div>
-                            <span>{st.displayName}</span>
+                            <div>
+                              <span>{st.displayName}</span>
+                              {st.section && (
+                                <p className="text-[11px] font-normal text-[#4D6354]">{st.section}</p>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="py-3 pr-4">
@@ -640,18 +827,68 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             </div>
           )}
 
-          {alerts.length > 0 && (
+          {/* Helper for legacy/unassigned students so teachers can claim them into their room */}
+          {unassignedStudents.length > 0 && (!isAdmin || adminRoomFilter !== '__UNASSIGNED__') && (
             <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
               <div>
                 <h4 className="text-sm font-bold text-[#172A1E]">
-                  Integrity Violation History ({alerts.length})
+                  Unassigned Students Without a Section ({unassignedStudents.length})
+                </h4>
+                <p className="text-xs text-[#4D6354]">
+                  Assign students who have not picked a section yet directly into{' '}
+                  <strong>{isAdmin && activeRoomSection !== 'ALL' ? activeRoomSection : myTeachingSection}</strong>.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {unassignedStudents.map((st) => {
+                  const targetSec =
+                    isAdmin && activeRoomSection !== 'ALL' && activeRoomSection !== '__UNASSIGNED__'
+                      ? activeRoomSection
+                      : myTeachingSection;
+                  return (
+                    <div
+                      key={st.uid}
+                      className="p-3 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-[#172A1E] truncate">{st.displayName}</p>
+                        <p className="text-[11px] text-[#4D6354] truncate">Pet: {st.petName}</p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={assigningUid === st.uid}
+                        onClick={async () => {
+                          setAssigningUid(st.uid);
+                          try {
+                            await onAssignStudentSection(st.uid, targetSec);
+                            soundFx.playCorrect();
+                          } finally {
+                            setAssigningUid(null);
+                          }
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#1E5B3A] hover:bg-[#17462C] text-white text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-60"
+                      >
+                        {assigningUid === st.uid ? 'Adding...' : '+ Add to Class'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {roomAlerts.length > 0 && (
+            <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
+              <div>
+                <h4 className="text-sm font-bold text-[#172A1E]">
+                  Classroom Integrity Violation History ({roomAlerts.length})
                 </h4>
                 <p className="text-xs text-[#4D6354]">
                   Permanent log of every tab switch, split-screen, fullscreen exit, or copy/paste attempt — even after a student is allowed back.
                 </p>
               </div>
               <div className="divide-y divide-[#F2EFE6] max-h-64 overflow-y-auto">
-                {alerts.slice(0, 25).map((al) => (
+                {roomAlerts.slice(0, 25).map((al) => (
                   <div key={al.id} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <div>
                       <span className="font-bold text-[#172A1E]">{al.studentName}</span>
@@ -972,6 +1209,13 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                 setCodesFeedback({ type: 'err', text: 'Codes must be at least 4 characters long.' });
                 return;
               }
+              if (cleanTeach === cleanAdmin) {
+                setCodesFeedback({
+                  type: 'err',
+                  text: 'Teacher Secret Code and Admin Secret Code must be different.',
+                });
+                return;
+              }
               setSavingCodes(true);
               setCodesFeedback(null);
               try {
@@ -997,10 +1241,10 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               <div>
                 <h3 className="text-lg font-bold text-[#172A1E] flex items-center gap-2">
                   <KeyRound className="w-5 h-5 text-[#EA7A26]" />
-                  Multi-User Teacher &amp; Admin Secret Codes
+                  Secret Access Codes (One for Admin, One for Teachers)
                 </h3>
                 <p className="text-xs text-[#4D6354] mt-1">
-                  Share the Teacher Secret Code with SLA teachers and the Admin Secret Code with co-admins so they can sign in from any Gmail account. Students without a code stay locked in Student mode.
+                  Teachers use the Teacher Secret Code to open their classroom monitor and cannot elevate to Admin. Admins have their own separate Admin Secret Code.
                 </p>
               </div>
             </div>
@@ -1068,7 +1312,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                 </p>
               ) : (
                 <p className="text-xs text-[#4D6354]">
-                  Tip: Rotate these codes each term for stronger classroom security.
+                  Tip: Change these secret codes anytime — one code is strictly for Teachers and the other is strictly for Admins.
                 </p>
               )}
               <button
@@ -1082,7 +1326,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
           </form>
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Authorize Faculty Form */}
+            {/* Authorize Teacher Form (Teachers Only) */}
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
@@ -1090,18 +1334,18 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                 if (!cleanEmail || !facultyName.trim()) {
                   setFacultyFeedback({
                     type: 'err',
-                    text: 'Please provide both Faculty Full Name and Gmail Address.',
+                    text: 'Please provide both Teacher Full Name and Gmail Address.',
                   });
                   return;
                 }
                 setSavingFaculty(true);
                 setFacultyFeedback(null);
                 try {
-                  await onAddAuthorizedFaculty(cleanEmail, facultyName.trim(), facultyRole);
+                  await onAddAuthorizedFaculty(cleanEmail, facultyName.trim(), 'teacher');
                   soundFx.playLevelUp();
                   setFacultyFeedback({
                     type: 'ok',
-                    text: `Authorized ${cleanEmail} as ${facultyRole}.`,
+                    text: `Authorized ${cleanEmail} as a Teacher.`,
                   });
                   setFacultyEmail('');
                   setFacultyName('');
@@ -1109,7 +1353,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                   soundFx.playWrong();
                   setFacultyFeedback({
                     type: 'err',
-                    text: err instanceof Error ? err.message : 'Unable to authorize faculty email.',
+                    text: err instanceof Error ? err.message : 'Unable to authorize teacher email.',
                   });
                 } finally {
                   setSavingFaculty(false);
@@ -1120,15 +1364,15 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             <div>
               <h3 className="text-lg font-bold text-[#172A1E] flex items-center gap-2">
                 <UserPlus className="w-5 h-5 text-[#EA7A26]" />
-                Authorize Teacher or Admin
+                Authorize Teacher Gmail
               </h3>
               <p className="text-xs text-[#4D6354] mt-1">
-                Only Gmail accounts listed here can register or sign in as a Teacher or Admin. All other Gmail logins are locked to Student mode.
+                Pre-authorize a teacher&apos;s Gmail account so they enter Teacher Classroom mode directly without needing Admin privileges.
               </p>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-[#172A1E] mb-1">Faculty Full Name</label>
+              <label className="block text-xs font-semibold text-[#172A1E] mb-1">Teacher Full Name</label>
               <input
                 type="text"
                 required
@@ -1153,16 +1397,8 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[#172A1E] mb-1">Authorized Role</label>
-              <select
-                value={facultyRole}
-                onChange={(e) => setFacultyRole(e.target.value as 'teacher' | 'admin')}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm bg-white"
-              >
-                <option value="teacher">Teacher (Monitor, Quizzes &amp; Duck Recitation)</option>
-                <option value="admin">Admin (Full Faculty Access &amp; Role Management)</option>
-              </select>
+            <div className="p-3 rounded-xl bg-[#FAF8F2] border border-[#E5DEC9] text-xs text-[#4D6354]">
+              Authorized Role: <strong className="text-[#1E5B3A]">Teacher</strong> (Individual Classroom Room &amp; Quizzes only — cannot promote to Admin).
             </div>
 
             {facultyFeedback && (
@@ -1182,17 +1418,17 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               disabled={savingFaculty}
               className="w-full py-2.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
             >
-              {savingFaculty ? 'Saving Authorization...' : 'Grant Faculty Access'}
+              {savingFaculty ? 'Saving Authorization...' : 'Authorize Teacher'}
             </button>
           </form>
 
           {/* Authorized Faculty List & Enrolled User Role Control */}
           <div className="lg:col-span-7 space-y-6">
             <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-4">
-              <h4 className="text-sm font-bold text-[#172A1E]">Authorized Faculty Allowlist</h4>
+              <h4 className="text-sm font-bold text-[#172A1E]">Authorized Teachers Allowlist</h4>
               {authorizedFaculty.length === 0 ? (
                 <p className="text-xs text-[#4D6354]">
-                  No additional teachers added yet. Your Admin email (maxsison2@gmail.com) is always authorized.
+                  No pre-authorized teachers added yet. Teachers can also join using the Teacher Secret Code.
                 </p>
               ) : (
                 <div className="divide-y divide-[#F2EFE6]">
@@ -1218,19 +1454,29 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             </div>
 
             <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-4">
-              <h4 className="text-sm font-bold text-[#172A1E]">Manage Enrolled Account Roles</h4>
+              <div>
+                <h4 className="text-sm font-bold text-[#172A1E]">Manage Student &amp; Teacher Accounts</h4>
+                <p className="text-xs text-[#4D6354] mt-0.5">
+                  Assign accounts between Student and Teacher roles. Teachers cannot be elevated to Admin here.
+                </p>
+              </div>
               <div className="divide-y divide-[#F2EFE6]">
                 {allProfiles.map((userProf) => (
                   <div key={userProf.uid} className="py-3 flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-bold text-[#172A1E]">{userProf.displayName}</p>
                       <p className="text-xs text-[#4D6354] capitalize">
-                        Current role: <strong className="text-[#1E5B3A]">{userProf.role}</strong> · Pet: {userProf.petName}
+                        Role: <strong className="text-[#1E5B3A]">{userProf.role}</strong> · Section:{' '}
+                        {userProf.section || 'Unassigned'} · Pet: {userProf.petName}
                       </p>
                     </div>
-                    {userProf.uid !== teacherProfile.uid && (
+                    {userProf.uid === teacherProfile.uid ? (
+                      <span className="px-2.5 py-1 rounded-lg bg-[#EA7A26]/15 text-[#C65B10] text-xs font-bold">
+                        Your Admin Account
+                      </span>
+                    ) : (
                       <div className="flex items-center gap-1.5">
-                        {(['student', 'teacher', 'admin'] as UserRole[]).map((r) => (
+                        {(['student', 'teacher'] as const).map((r) => (
                           <button
                             key={r}
                             type="button"
