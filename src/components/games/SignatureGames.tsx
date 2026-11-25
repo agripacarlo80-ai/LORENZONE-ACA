@@ -13,6 +13,12 @@ import {
 import { PublicProfile, QuizQuestion } from '../../types';
 import { PetAvatar } from '../PetAvatar';
 import { soundFx } from '../../lib/sound';
+import {
+  checkEnumerationMatch,
+  getQuestionTypeLabel,
+  normalizeAnswerText,
+  splitPromptBlank,
+} from '../../lib/questionUtils';
 
 export interface GameSessionResult {
   score: number;
@@ -601,21 +607,43 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
   }, [timeLeft, questions.length, onComplete, startTime]);
 
   const q = questions[idx];
+  const isEnumeration = Boolean(
+    q?.questionType === 'enumeration' && q.enumerationItems && q.enumerationItems.length >= 2
+  );
+  const expectedEnumItems = useMemo(
+    () => (isEnumeration && q?.enumerationItems ? q.enumerationItems : []),
+    [isEnumeration, q?.enumerationItems]
+  );
+  const [enumGuesses, setEnumGuesses] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (expectedEnumItems.length > 0) {
+      setEnumGuesses(Array(expectedEnumItems.length).fill(''));
+    } else {
+      setEnumGuesses([]);
+    }
+  }, [idx, expectedEnumItems.length]);
+
   if (!q) {
     return <EmptyDeckNotice />;
   }
 
+  const promptParts = splitPromptBlank(q.prompt);
+  const canSubmit = isEnumeration
+    ? enumGuesses.length === expectedEnumItems.length && enumGuesses.every((g) => g.trim().length > 0)
+    : typed.trim().length > 0;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting || completedRef.current || !typed.trim()) return;
+    if (submitting || completedRef.current || !canSubmit) return;
     setSubmitting(true);
 
-    const normalizedGuess = typed.replace(/\s+/g, ' ').trim().toUpperCase();
-    const normalizedAns = q.answer.replace(/\s+/g, ' ').trim().toUpperCase();
-    const isRight = normalizedGuess === normalizedAns;
+    const isRight = isEnumeration
+      ? checkEnumerationMatch(enumGuesses, expectedEnumItems)
+      : normalizeAnswerText(typed) === normalizeAnswerText(q.answer);
 
     const nextCorrect = isRight ? correctCount + 1 : correctCount;
-    const nextScore = isRight ? score + 40 : score;
+    const nextScore = isRight ? score + (isEnumeration ? 50 : 40) : score;
     const nextLevel = isRight ? platformLevel + 1 : platformLevel;
     const nextAnswered = answeredCount + 1;
     setAnsweredCount(nextAnswered);
@@ -625,7 +653,7 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
       setPlatformLevel(nextLevel);
       setCorrectCount(nextCorrect);
       setScore(nextScore);
-      setFeedback('Platform elevated! +40 pts');
+      setFeedback(`Platform elevated! +${isEnumeration ? 50 : 40} pts`);
     } else {
       soundFx.playWrong();
       setFeedback(`Correct answer: ${q.answer}`);
@@ -683,33 +711,72 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
         </div>
       </div>
 
-      {/* Identification Input */}
+      {/* Identification / Fill in the Blank / Enumeration Input */}
       <div className="lg:col-span-8 bg-white rounded-2xl border border-[#E5DEC9] p-6 flex flex-col justify-between">
         <div>
           <div className="flex items-center justify-between text-xs text-[#4D6354] mb-3 tabular-nums">
-            <span>Identification {idx + 1} of {questions.length}</span>
+            <span>
+              {getQuestionTypeLabel(q)} · {idx + 1} of {questions.length}
+            </span>
             <span className="font-bold text-[#1E5B3A]">Score: {score}</span>
           </div>
-          <h3 className="text-xl font-bold text-[#172A1E] mb-2">{q.prompt}</h3>
+          <h3 className="text-xl font-bold text-[#172A1E] mb-2 leading-snug">
+            {promptParts.hasBlank ? (
+              <>
+                {promptParts.before}
+                <span className="inline-block min-w-[90px] mx-1 px-2 py-0.5 rounded-lg bg-[#FFF8F1] border-b-2 border-[#EA7A26] text-[#C65B10] font-extrabold text-center">
+                  {typed.trim() || '_____'}
+                </span>
+                {promptParts.after}
+              </>
+            ) : (
+              q.prompt
+            )}
+          </h3>
           <p className="text-xs text-[#4D6354]">Hint: {q.hint}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-3">
-          <input
-            type="text"
-            autoFocus
-            disabled={submitting}
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-            placeholder="Type your identification answer..."
-            className="w-full px-4 py-3 rounded-xl border-2 border-[#D8D0BC] focus:border-[#1E5B3A] focus:outline-none text-base font-semibold disabled:opacity-60"
-          />
+          {isEnumeration ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {expectedEnumItems.map((_, itemIdx) => (
+                <input
+                  key={itemIdx}
+                  type="text"
+                  autoFocus={itemIdx === 0}
+                  disabled={submitting}
+                  value={enumGuesses[itemIdx] || ''}
+                  onChange={(e) => {
+                    const next = [...enumGuesses];
+                    next[itemIdx] = e.target.value;
+                    setEnumGuesses(next);
+                  }}
+                  placeholder={`Item ${itemIdx + 1} of ${expectedEnumItems.length}...`}
+                  className="w-full px-3.5 py-2.5 rounded-xl border-2 border-[#D8D0BC] focus:border-[#1E5B3A] focus:outline-none text-sm font-semibold disabled:opacity-60"
+                />
+              ))}
+            </div>
+          ) : (
+            <input
+              type="text"
+              autoFocus
+              disabled={submitting}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={
+                q.questionType === 'fill_in_blank'
+                  ? 'Type the missing word or phrase...'
+                  : 'Type your identification answer...'
+              }
+              className="w-full px-4 py-3 rounded-xl border-2 border-[#D8D0BC] focus:border-[#1E5B3A] focus:outline-none text-base font-semibold disabled:opacity-60"
+            />
+          )}
           {feedback && (
             <p className="text-xs font-bold text-[#EA7A26]">{feedback}</p>
           )}
           <button
             type="submit"
-            disabled={submitting || !typed.trim()}
+            disabled={submitting || !canSubmit}
             className="w-full py-3 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white font-bold text-sm transition-colors cursor-pointer disabled:opacity-50"
           >
             {submitting ? 'Checking Answer...' : 'Elevate Platform'}

@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Utensils,
   Gamepad2,
-  Sparkles,
   Moon,
   Sun,
   ShoppingBag,
@@ -13,12 +12,21 @@ import {
   Lock,
   Camera,
   Trash2,
+  Hand,
+  Bath,
+  Eye,
+  RotateCcw,
+  Plus,
+  HeartPulse,
+  Sparkles,
 } from 'lucide-react';
 import { PET_COLORS, PET_SPECIES_INFO, SHOP_ITEMS } from '../data/defaultDecks';
-import { PetSpecies, PublicProfile, ScoreRecord } from '../types';
+import { PetSpecies, PublicProfile, ScoreRecord, ShopCategory, ShopItem } from '../types';
 import { PetAvatar } from './PetAvatar';
+import { ShopItemVisual } from './ShopItemVisual';
 import { soundFx } from '../lib/sound';
 import { compressProfilePhoto } from '../lib/imageUpload';
+import { applyXpGain, getPetHealthState, xpRequiredForLevel } from '../lib/progression';
 
 interface PetHomeAndCareProps {
   profile: PublicProfile;
@@ -29,6 +37,38 @@ interface PetHomeAndCareProps {
 }
 
 type HomeSubView = 'room' | 'shop' | 'customize' | 'history';
+type RoomMode = 'pet' | 'feed' | 'play' | 'wash';
+type PetMoodState =
+  | 'happy'
+  | 'excited'
+  | 'sleepy'
+  | 'concerned'
+  | 'eating'
+  | 'blushing'
+  | 'soapy'
+  | 'sick'
+  | 'showering';
+
+type DragItemKind =
+  | { kind: 'food'; itemId: string; isEmergency?: boolean }
+  | { kind: 'soap'; itemId: 'tool_soap' }
+  | { kind: 'shower'; itemId: 'tool_shower' };
+
+interface ActiveDragState {
+  target: DragItemKind;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  moved: boolean;
+}
+
+interface FloatingParticle {
+  id: number;
+  text: string;
+  tone: 'green' | 'orange' | 'sky' | 'rose';
+  xOffset: number;
+}
 
 const SUB_VIEW_ACTIVITY: Record<HomeSubView, string> = {
   room: 'Pet Home Room',
@@ -45,11 +85,25 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
   onSetActivity,
 }) => {
   const [subView, setSubView] = useState<HomeSubView>('room');
-  const [shopCategory, setShopCategory] = useState<'clothes' | 'accessories' | 'furniture'>('clothes');
+  const [shopCategory, setShopCategory] = useState<ShopCategory>('food');
+  const [roomMode, setRoomMode] = useState<RoomMode>('pet');
+  const [transientMood, setTransientMood] = useState<PetMoodState | null>(null);
+  const [bounceKey, setBounceKey] = useState(0);
+  const [particles, setParticles] = useState<FloatingParticle[]>([]);
+  const [feedingVisualId, setFeedingVisualId] = useState<string | null>(null);
+  const [ballPos, setBallPos] = useState<{ x: number; y: number }>({ x: 76, y: 74 });
+  const [foamLevel, setFoamLevel] = useState(0);
+  const [dragState, setDragState] = useState<ActiveDragState | null>(null);
+  const [isHoveringPet, setIsHoveringPet] = useState(false);
+
+  const [previewOutfitId, setPreviewOutfitId] = useState<string | null>(null);
+  const [previewAccessoryId, setPreviewAccessoryId] = useState<string | null>(null);
+  const [selectedShopItem, setSelectedShopItem] = useState<ShopItem>(SHOP_ITEMS[0]);
+
   const [petMessage, setPetMessage] = useState<string>(
     profile.isSleeping
       ? `Good night! ${profile.petName} is resting for tomorrow's quiz.`
-      : `Welcome back to San Lorenzo Academy, ${profile.displayName}!`
+      : `Tap ${profile.petName}, drag snacks from the pantry, or start Bath Time!`
   );
   const [editingPetName, setEditingPetName] = useState(profile.petName);
   const [editingDisplayName, setEditingDisplayName] = useState(profile.displayName);
@@ -58,140 +112,697 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
   const [photoStatus, setPhotoStatus] = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
+  const petDropRef = useRef<HTMLDivElement | null>(null);
+  const lastXpGrantRef = useRef<number>(0);
+  const lastScrubTickRef = useRef<number>(0);
+  const moodTimeoutRef = useRef<number | null>(null);
+
   useEffect(() => {
     setEditingPetName(profile.petName);
     setEditingDisplayName(profile.displayName);
   }, [profile.petName, profile.displayName]);
 
+  useEffect(() => {
+    return () => {
+      if (moodTimeoutRef.current !== null) {
+        window.clearTimeout(moodTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const hasLeafBed = profile.unlockedItems.includes('furn_leaf_bed');
   const hasStudyPlant = profile.unlockedItems.includes('furn_study_plant');
   const hasOrangeRug = profile.unlockedItems.includes('furn_orange_rug');
+  const hasBookshelf = profile.unlockedItems.includes('furn_bookshelf');
+  const hasDeskLamp = profile.unlockedItems.includes('furn_desk_lamp');
+  const hasAquarium = profile.unlockedItems.includes('furn_aquarium');
+  const hasBeanbag = profile.unlockedItems.includes('furn_beanbag');
+  const hasTrophyCase = profile.unlockedItems.includes('furn_trophy_case');
+  const ownedFurniture = useMemo(
+    () =>
+      SHOP_ITEMS.filter(
+        (item) => item.category === 'furniture' && profile.unlockedItems.includes(item.id)
+      ),
+    [profile.unlockedItems]
+  );
 
-  const xpNeeded = profile.petLevel * 100;
+  const healthState = useMemo(
+    () =>
+      getPetHealthState({
+        hunger: profile.hunger,
+        happiness: profile.happiness,
+        energy: profile.energy,
+        cleanliness: profile.cleanliness,
+      }),
+    [profile.cleanliness, profile.energy, profile.happiness, profile.hunger]
+  );
+
+  const foodInventory = useMemo(() => profile.foodInventory ?? {}, [profile.foodInventory]);
+  const ownedFoods = useMemo(
+    () =>
+      SHOP_ITEMS.filter(
+        (item) => item.category === 'food' && (foodInventory[item.id] ?? 0) > 0
+      ),
+    [foodInventory]
+  );
+  const totalFoodCount = useMemo(
+    () => Object.values(foodInventory).reduce((sum, count) => sum + Math.max(0, count || 0), 0),
+    [foodInventory]
+  );
+
+  const xpNeeded = xpRequiredForLevel(profile.petLevel);
   const xpProgress = Math.min(100, Math.round((profile.petXp / xpNeeded) * 100));
 
-  const applyCareAction = async (type: 'feed' | 'play' | 'clean' | 'sleep') => {
+  const triggerMood = useCallback((mood: PetMoodState, durationMs = 1100) => {
+    setTransientMood(mood);
+    setBounceKey((k) => k + 1);
+    if (moodTimeoutRef.current !== null) {
+      window.clearTimeout(moodTimeoutRef.current);
+    }
+    moodTimeoutRef.current = window.setTimeout(() => {
+      setTransientMood(null);
+    }, durationMs);
+  }, []);
+
+  const spawnParticle = useCallback((text: string, tone: FloatingParticle['tone']) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    const xOffset = Math.round((Math.random() - 0.5) * 90);
+    setParticles((prev) => [...prev.slice(-5), { id, text, tone, xOffset }]);
+    window.setTimeout(() => {
+      setParticles((prev) => prev.filter((p) => p.id !== id));
+    }, 1100);
+  }, []);
+
+  const computeSmallCareXp = useCallback(
+    (wasNeeded: boolean, baseXp: number, allowWhileSick = false): number => {
+      if (!wasNeeded) return 0;
+      if (healthState.isSick && !allowWhileSick) return 0;
+      const now = Date.now();
+      if (now - lastXpGrantRef.current < 4500) {
+        return 0;
+      }
+      lastXpGrantRef.current = now;
+      const furnitureXpBonus = (hasBookshelf ? 1 : 0) + (hasTrophyCase ? 2 : 0);
+      return baseXp + furnitureXpBonus;
+    },
+    [hasBookshelf, hasTrophyCase, healthState.isSick]
+  );
+
+  const baseMood: PetMoodState = useMemo(() => {
+    if (healthState.isSick) return 'sick';
+    if (profile.isSleeping) return 'sleepy';
+    if (profile.hunger < 28 || profile.cleanliness < 28 || profile.happiness < 25) {
+      return 'concerned';
+    }
+    if (profile.energy < 22) return 'sleepy';
+    return 'happy';
+  }, [
+    healthState.isSick,
+    profile.cleanliness,
+    profile.energy,
+    profile.happiness,
+    profile.hunger,
+    profile.isSleeping,
+  ]);
+
+  const activeMood: PetMoodState =
+    dragState?.target.kind === 'food' && isHoveringPet
+      ? 'eating'
+      : transientMood ?? baseMood;
+
+  const isPointOverPet = useCallback((clientX: number, clientY: number): boolean => {
+    const el = petDropRef.current;
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return (
+      clientX >= rect.left - 18 &&
+      clientX <= rect.right + 18 &&
+      clientY >= rect.top - 18 &&
+      clientY <= rect.bottom + 18
+    );
+  }, []);
+
+  const handleSoapScrub = useCallback(() => {
+    soundFx.playCare();
+    setFoamLevel((prev) => {
+      const next = Math.min(100, prev + 28);
+      return next;
+    });
+    triggerMood('soapy', 1000);
+    spawnParticle('Bubbles!', 'sky');
+    setPetMessage(`Nice scrub! Now drag or tap the Shower Head to rinse off the foam!`);
+  }, [spawnParticle, triggerMood]);
+
+  const handleRinseShower = useCallback(async () => {
     if (actionBusy) return;
     setActionBusy(true);
     try {
       soundFx.playCare();
-      let hunger = Math.min(100, Math.max(0, profile.hunger));
-      let happiness = Math.min(100, Math.max(0, profile.happiness));
-      let energy = Math.min(100, Math.max(0, profile.energy));
-      let cleanliness = Math.min(100, Math.max(0, profile.cleanliness));
-      let isSleeping = profile.isSleeping;
-      let petXp = profile.petXp + 15;
-      let petLevel = profile.petLevel;
-
-      const plantBonus = hasStudyPlant ? 5 : 0;
+      triggerMood('showering', 1200);
       const rugBonus = hasOrangeRug ? 4 : 0;
+      const aquariumBonus = hasAquarium ? 6 : 0;
+      const foamBonus = foamLevel >= 55 ? 16 : 0;
+      const cleanBoost = 28 + foamBonus + rugBonus + aquariumBonus;
+      const cleanNeeded = profile.cleanliness < 96;
+      const gainedXp = computeSmallCareXp(cleanNeeded, foamLevel >= 55 ? 5 : 3, true);
+      const nextClean = Math.min(100, profile.cleanliness + cleanBoost);
+      const nextHappiness = Math.min(
+        100,
+        profile.happiness + (foamLevel >= 55 ? 10 : 5) + (hasStudyPlant ? 3 : 0)
+      );
+      setFoamLevel(0);
 
-      if (type === 'feed') {
-        hunger = Math.min(100, hunger + 22);
-        happiness = Math.min(100, happiness + 6 + rugBonus);
-        isSleeping = false;
-        setPetMessage(
-          hasOrangeRug
-            ? 'Yum! Cozy campus snacks + Marigold Rug bonus!'
-            : 'Yum! Healthy campus snacks boost my focus!'
-        );
-      } else if (type === 'play') {
-        happiness = Math.min(100, happiness + 24 + plantBonus);
-        energy = Math.max(0, energy - 10);
-        hunger = Math.max(0, hunger - 6);
-        isSleeping = false;
-        setPetMessage(
-          hasStudyPlant
-            ? 'So fun! Potted Monstera adds +5% happiness!'
-            : 'That was fun! Ready to win a mini-game next!'
-        );
-      } else if (type === 'clean') {
-        cleanliness = Math.min(100, cleanliness + 28 + rugBonus);
-        happiness = Math.min(100, happiness + 8 + plantBonus);
-        isSleeping = false;
-        setPetMessage('Squeaky clean uniform and tidy desk!');
-      } else if (type === 'sleep') {
-        isSleeping = !isSleeping;
-        if (isSleeping) {
-          const bonus = (hasLeafBed ? 35 : 25) + rugBonus;
-          energy = Math.min(100, energy + bonus);
-          setPetMessage(`Zzz... Resting to recharge energy (+${bonus}%).`);
-        } else {
-          setPetMessage('Good morning! Fully energized for class!');
-        }
-      }
+      const { petLevel, petXp, leveledUp } = applyXpGain(
+        profile.petLevel,
+        profile.petXp,
+        gainedXp
+      );
 
-      while (petXp >= petLevel * 100) {
-        petXp -= petLevel * 100;
-        petLevel += 1;
-        soundFx.playLevelUp();
-        setPetMessage(`Level Up! ${profile.petName} reached Level ${petLevel}!`);
-      }
+      spawnParticle(`+${cleanBoost}% Clean`, 'sky');
+      if (gainedXp > 0) spawnParticle(`+${gainedXp} XP`, 'green');
+
+      setPetMessage(
+        leveledUp
+          ? `Level Up! ${profile.petName} reached Level ${petLevel}!`
+          : foamBonus > 0
+            ? `Sparkling Bath Complete! Soapy scrub + warm rinse (+${cleanBoost}% Clean)!`
+            : `Fresh rinse! Use the Soap Bar first for a deeper bubble bath!`
+      );
 
       await onUpdateProfile({
-        hunger,
-        happiness,
-        energy,
-        cleanliness,
-        isSleeping,
+        cleanliness: nextClean,
+        happiness: nextHappiness,
+        isSleeping: false,
         petXp,
         petLevel,
-        ...(profile.lockedOut ? {} : { activeGame: 'Caring for Pet' }),
+        ...(profile.lockedOut ? {} : { activeGame: 'Bath Time with Pet' }),
+      });
+    } finally {
+      setActionBusy(false);
+    }
+  }, [
+    actionBusy,
+    computeSmallCareXp,
+    foamLevel,
+    hasAquarium,
+    hasOrangeRug,
+    hasStudyPlant,
+    onUpdateProfile,
+    profile.cleanliness,
+    profile.happiness,
+    profile.lockedOut,
+    profile.petLevel,
+    profile.petName,
+    profile.petXp,
+    spawnParticle,
+    triggerMood,
+  ]);
+
+  const handleFeedItem = useCallback(
+    async (foodId: string, isEmergencyCracker = false) => {
+      if (actionBusy) return;
+      const foodItem = SHOP_ITEMS.find((i) => i.id === foodId);
+      if (!isEmergencyCracker && !foodItem) return;
+
+      const isMedicine = Boolean(foodItem?.isMedicine);
+      if (!isMedicine && profile.hunger >= 100 && (foodItem?.energyBoost ?? 0) === 0) {
+        soundFx.playClick();
+        setPetMessage(`${profile.petName} is completely full right now!`);
+        return;
+      }
+
+      const currentQty = foodInventory[foodId] ?? 0;
+      if (!isEmergencyCracker && currentQty <= 0) {
+        soundFx.playWrong();
+        setPetMessage('Out of this item! Visit SLA Shop to buy more food or drinks.');
+        return;
+      }
+
+      setActionBusy(true);
+      try {
+        soundFx.playCare();
+        setFeedingVisualId(foodId);
+        triggerMood('eating', 1100);
+        window.setTimeout(() => setFeedingVisualId(null), 900);
+
+        const hungerGain = isEmergencyCracker ? 14 : foodItem?.hungerBoost ?? 20;
+        const joyGain = isEmergencyCracker ? 2 : foodItem?.happinessBoost ?? 4;
+        const lampEnergyBonus = !isEmergencyCracker && foodItem?.isDrink && hasDeskLamp ? 6 : 0;
+        const energyGain = isEmergencyCracker ? 0 : (foodItem?.energyBoost ?? 0) + lampEnergyBonus;
+        const cleanGain = isEmergencyCracker ? 0 : foodItem?.cleanlinessBoost ?? 0;
+        const rugBonus = hasOrangeRug ? 4 : 0;
+
+        const hungerWasNeeded = profile.hunger < 98 || isMedicine;
+        const gainedXp = isEmergencyCracker
+          ? hungerWasNeeded && !healthState.isSick
+            ? 1
+            : 0
+          : computeSmallCareXp(hungerWasNeeded, foodItem?.xpBoost ?? 4, isMedicine);
+
+        const nextHunger = isMedicine
+          ? Math.max(55, Math.min(100, profile.hunger + hungerGain))
+          : Math.min(100, profile.hunger + hungerGain);
+        const nextHappiness = isMedicine
+          ? Math.max(55, Math.min(100, profile.happiness + joyGain + rugBonus))
+          : Math.min(100, profile.happiness + joyGain + rugBonus);
+        const nextEnergy = isMedicine
+          ? Math.max(55, Math.min(100, profile.energy + energyGain))
+          : Math.min(100, profile.energy + energyGain);
+        const nextClean = isMedicine
+          ? Math.max(55, Math.min(100, profile.cleanliness + cleanGain))
+          : profile.cleanliness;
+
+        const nextInventory: Record<string, number> = { ...foodInventory };
+        if (!isEmergencyCracker) {
+          const remaining = currentQty - 1;
+          if (remaining > 0) {
+            nextInventory[foodId] = remaining;
+          } else {
+            delete nextInventory[foodId];
+          }
+        }
+
+        const { petLevel, petXp, leveledUp } = applyXpGain(
+          profile.petLevel,
+          profile.petXp,
+          gainedXp
+        );
+
+        if (isMedicine) {
+          spawnParticle('Cured!', 'green');
+        } else {
+          spawnParticle(`+${hungerGain}% Hunger`, 'green');
+        }
+        if (energyGain > 0) spawnParticle(`+${energyGain}% Energy`, 'orange');
+        if (gainedXp > 0) spawnParticle(`+${gainedXp} XP`, 'green');
+
+        const healedNow =
+          healthState.isSick &&
+          !getPetHealthState({
+            hunger: nextHunger,
+            happiness: nextHappiness,
+            energy: nextEnergy,
+            cleanliness: nextClean,
+          }).isSick;
+
+        setPetMessage(
+          leveledUp
+            ? `Level Up! ${profile.petName} reached Level ${petLevel}!`
+            : isMedicine || healedNow
+              ? `${profile.petName} feels much better and recovered from sickness!`
+              : isEmergencyCracker
+                ? `Crunch! Emergency Cracker helped keep ${profile.petName} going.`
+                : foodItem?.isDrink
+                  ? `Glug glug! ${profile.petName} loved the ${foodItem.name}!`
+                  : `Nom nom! ${profile.petName} devoured the ${foodItem?.name}!`
+        );
+
+        await onUpdateProfile({
+          hunger: nextHunger,
+          happiness: nextHappiness,
+          energy: nextEnergy,
+          cleanliness: nextClean,
+          isSleeping: false,
+          foodInventory: nextInventory,
+          petXp,
+          petLevel,
+          ...(profile.lockedOut ? {} : { activeGame: 'Feeding Pet' }),
+        });
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [
+      actionBusy,
+      computeSmallCareXp,
+      foodInventory,
+      hasDeskLamp,
+      hasOrangeRug,
+      healthState.isSick,
+      onUpdateProfile,
+      profile.cleanliness,
+      profile.energy,
+      profile.happiness,
+      profile.hunger,
+      profile.lockedOut,
+      profile.petLevel,
+      profile.petName,
+      profile.petXp,
+      spawnParticle,
+      triggerMood,
+    ]
+  );
+
+  // Global Pointer Drag Listeners for Foods, Drinks, Soap Bar, and Shower Head
+  useEffect(() => {
+    if (!dragState) return;
+
+    const handleMove = (e: PointerEvent) => {
+      const dist = Math.hypot(e.clientX - dragState.startX, e.clientY - dragState.startY);
+      const moved = dragState.moved || dist > 8;
+      const over = isPointOverPet(e.clientX, e.clientY);
+      setIsHoveringPet(over);
+      setDragState((prev) =>
+        prev ? { ...prev, x: e.clientX, y: e.clientY, moved } : null
+      );
+
+      if (moved && over && dragState.target.kind === 'soap') {
+        const now = Date.now();
+        if (now - lastScrubTickRef.current > 360) {
+          lastScrubTickRef.current = now;
+          handleSoapScrub();
+        }
+      }
+    };
+
+    const handleUp = (e: PointerEvent) => {
+      const over = isPointOverPet(e.clientX, e.clientY);
+      const currentTarget = dragState.target;
+      const didDrag = dragState.moved;
+      setDragState(null);
+      setIsHoveringPet(false);
+
+      if (currentTarget.kind === 'food') {
+        if (over || !didDrag) {
+          void handleFeedItem(currentTarget.itemId, currentTarget.isEmergency);
+        }
+      } else if (currentTarget.kind === 'soap') {
+        if (over || !didDrag) {
+          handleSoapScrub();
+        }
+      } else if (currentTarget.kind === 'shower') {
+        if (over || !didDrag) {
+          void handleRinseShower();
+        }
+      }
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+    };
+  }, [dragState, handleFeedItem, handleRinseShower, handleSoapScrub, isPointOverPet]);
+
+  const startPointerDrag = (e: React.PointerEvent, target: DragItemKind) => {
+    if (actionBusy) return;
+    e.preventDefault();
+    setDragState({
+      target,
+      startX: e.clientX,
+      startY: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      moved: false,
+    });
+    setIsHoveringPet(isPointOverPet(e.clientX, e.clientY));
+  };
+
+  const handlePlayBall = async () => {
+    if (actionBusy) return;
+    if (healthState.isSick) {
+      soundFx.playWrong();
+      setPetMessage(`${profile.petName} is too sick to play! Feed food, give Bath Time, or use SLA Care Potion.`);
+      return;
+    }
+    if (profile.energy < 8) {
+      soundFx.playWrong();
+      setPetMessage(`${profile.petName} is too tired to chase the ball! Let your pet rest or drink a Choco Energy Shake.`);
+      return;
+    }
+    setActionBusy(true);
+    try {
+      soundFx.playCare();
+      triggerMood('excited', 950);
+      setBallPos({
+        x: Math.round(14 + Math.random() * 72),
+        y: Math.round(28 + Math.random() * 54),
+      });
+
+      const plantBonus = hasStudyPlant ? 5 : 0;
+      const beanbagBonus = hasBeanbag ? 6 : 0;
+      const joyNeeded = profile.happiness < 96;
+      const gainedXp = computeSmallCareXp(joyNeeded, 3);
+      const joyBoost = 14 + plantBonus + beanbagBonus;
+      const nextHappiness = Math.min(100, profile.happiness + joyBoost);
+      const nextEnergy = Math.max(0, profile.energy - 6);
+      const nextHunger = Math.max(0, profile.hunger - 4);
+      const nextClean = Math.max(0, profile.cleanliness - 2);
+      const { petLevel, petXp, leveledUp } = applyXpGain(
+        profile.petLevel,
+        profile.petXp,
+        gainedXp
+      );
+
+      spawnParticle(`+${joyBoost}% Joy`, 'orange');
+      if (gainedXp > 0) spawnParticle(`+${gainedXp} XP`, 'green');
+
+      setPetMessage(
+        leveledUp
+          ? `Level Up! ${profile.petName} reached Level ${petLevel}!`
+          : `${profile.petName} chased the SLA ball across the room!`
+      );
+
+      await onUpdateProfile({
+        happiness: nextHappiness,
+        energy: nextEnergy,
+        hunger: nextHunger,
+        cleanliness: nextClean,
+        isSleeping: false,
+        petXp,
+        petLevel,
+        ...(profile.lockedOut ? {} : { activeGame: 'Playing with Pet' }),
       });
     } finally {
       setActionBusy(false);
     }
   };
 
-  const handleBuyOrEquip = async (itemId: string, category: 'clothes' | 'accessories' | 'furniture', price: number) => {
+  const handleDirectPetTap = async () => {
     if (actionBusy) return;
-    const isOwned = profile.unlockedItems.includes(itemId) || price === 0;
-    if (isOwned) {
-      soundFx.playClick();
-      if (category === 'clothes') {
-        setActionBusy(true);
-        try {
-          await onUpdateProfile({ outfit: itemId });
-        } finally {
-          setActionBusy(false);
-        }
-      } else if (category === 'accessories') {
-        setActionBusy(true);
-        try {
-          await onUpdateProfile({ accessory: itemId });
-        } finally {
-          setActionBusy(false);
-        }
+
+    if (roomMode === 'wash') {
+      if (foamLevel < 60) {
+        handleSoapScrub();
       } else {
-        setPetMessage('Room furniture is active and boosting your Pet Room!');
+        await handleRinseShower();
       }
       return;
     }
 
-    if (profile.coins < price) {
+    if (roomMode === 'play') {
+      await handlePlayBall();
+      return;
+    }
+
+    if (healthState.isSick) {
       soundFx.playWrong();
-      setPetMessage(`Need ${price - profile.coins} more LorenCoins! Play mini-games to earn coins.`);
+      setPetMessage(
+        `${profile.petName} has a fever (${healthState.reasons.join(', ')})! Feed food, give a Bath, or use SLA Care Potion.`
+      );
+      return;
+    }
+
+    setActionBusy(true);
+    try {
+      soundFx.playCare();
+      triggerMood('blushing', 1000);
+      const plantBonus = (hasStudyPlant ? 3 : 0) + (hasBeanbag ? 6 : 0);
+      const happinessNeeded = profile.happiness < 96;
+      const gainedXp = computeSmallCareXp(happinessNeeded, 2);
+      const nextHappiness = Math.min(100, profile.happiness + 6 + plantBonus);
+      const { petLevel, petXp, leveledUp } = applyXpGain(
+        profile.petLevel,
+        profile.petXp,
+        gainedXp
+      );
+
+      spawnParticle(`+${6 + plantBonus}% Joy`, 'rose');
+      if (gainedXp > 0) spawnParticle(`+${gainedXp} XP`, 'green');
+
+      setPetMessage(
+        leveledUp
+          ? `Level Up! ${profile.petName} reached Level ${petLevel}!`
+          : happinessNeeded
+            ? `${profile.petName} giggles happily from your pat!`
+            : `${profile.petName} is already super cheerful! Play quizzes for Coins & XP.`
+      );
+
+      await onUpdateProfile({
+        happiness: nextHappiness,
+        isSleeping: false,
+        petXp,
+        petLevel,
+        ...(profile.lockedOut ? {} : { activeGame: 'Playing with Pet' }),
+      });
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleToggleSleep = async () => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      soundFx.playCare();
+      const nextSleeping = !profile.isSleeping;
+      let energy = profile.energy;
+      let petXp = profile.petXp;
+      let petLevel = profile.petLevel;
+
+      if (nextSleeping) {
+        const rugBonus = hasOrangeRug ? 4 : 0;
+        const lampBonus = hasDeskLamp ? 6 : 0;
+        const bonus = (hasLeafBed ? 35 : 22) + rugBonus + lampBonus;
+        const energyNeeded = profile.energy < 92;
+        const gainedXp = computeSmallCareXp(energyNeeded, 3);
+        energy = Math.min(100, profile.energy + bonus);
+        const leveled = applyXpGain(petLevel, petXp, gainedXp);
+        petXp = leveled.petXp;
+        petLevel = leveled.petLevel;
+        spawnParticle(`+${bonus}% Energy`, 'orange');
+        if (gainedXp > 0) spawnParticle(`+${gainedXp} XP`, 'green');
+        setPetMessage(
+          leveled.leveledUp
+            ? `Level Up! ${profile.petName} reached Level ${petLevel}!`
+            : `Zzz... ${profile.petName} is recharging (+${bonus}% Energy).`
+        );
+      } else {
+        setPetMessage(`Good morning! ${profile.petName} is awake and ready to study!`);
+      }
+
+      await onUpdateProfile({
+        isSleeping: nextSleeping,
+        energy,
+        petXp,
+        petLevel,
+      });
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleBuyFood = async (item: ShopItem, quantity = 1) => {
+    if (actionBusy) return;
+    if (profile.petLevel < item.requiredLevel) {
+      soundFx.playWrong();
+      setPetMessage(`Reach Level ${item.requiredLevel} to unlock ${item.name}!`);
+      return;
+    }
+
+    const totalCost = item.price * quantity;
+    if (profile.coins < totalCost) {
+      soundFx.playWrong();
+      setPetMessage(`Need ${totalCost - profile.coins} more Coins for ${quantity}× ${item.name}! Play quiz games to earn Coins.`);
+      return;
+    }
+
+    const currentCount = foodInventory[item.id] ?? 0;
+    if (currentCount + quantity > 99) {
+      soundFx.playWrong();
+      setPetMessage(`Pantry limit reached for ${item.name} (max 99).`);
       return;
     }
 
     setActionBusy(true);
     try {
       soundFx.playLevelUp();
-      const nextUnlocked = Array.from(new Set([...profile.unlockedItems, itemId])).slice(0, 40);
+      const nextInventory: Record<string, number> = {
+        ...foodInventory,
+        [item.id]: currentCount + quantity,
+      };
+      await onUpdateProfile({
+        coins: profile.coins - totalCost,
+        foodInventory: nextInventory,
+      });
+      setPetMessage(`Bought ${quantity}× ${item.name}! Drag it to ${profile.petName} in Feed mode!`);
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleBuyOrEquip = async (item: ShopItem) => {
+    if (item.category === 'food') {
+      await handleBuyFood(item, 1);
+      return;
+    }
+    if (actionBusy) return;
+    const isOwned = profile.unlockedItems.includes(item.id) || item.price === 0;
+    if (isOwned) {
+      soundFx.playClick();
+      if (item.category === 'clothes') {
+        setActionBusy(true);
+        try {
+          setPreviewOutfitId(null);
+          await onUpdateProfile({ outfit: item.id });
+          setPetMessage(`Equipped ${item.name}!`);
+        } finally {
+          setActionBusy(false);
+        }
+      } else if (item.category === 'accessories') {
+        setActionBusy(true);
+        try {
+          setPreviewAccessoryId(null);
+          await onUpdateProfile({ accessory: item.id });
+          setPetMessage(`Equipped ${item.name}!`);
+        } finally {
+          setActionBusy(false);
+        }
+      } else {
+        setPetMessage(`${item.name} is active and decorating your Pet Room!`);
+      }
+      return;
+    }
+
+    if (profile.petLevel < item.requiredLevel) {
+      soundFx.playWrong();
+      setPetMessage(`Reach Level ${item.requiredLevel} to unlock ${item.name}!`);
+      return;
+    }
+
+    if (profile.coins < item.price) {
+      soundFx.playWrong();
+      setPetMessage(`Need ${item.price - profile.coins} more Coins! Beat quiz games with high accuracy to earn Coins.`);
+      return;
+    }
+
+    setActionBusy(true);
+    try {
+      soundFx.playLevelUp();
+      const nextUnlocked = Array.from(new Set([...profile.unlockedItems, item.id])).slice(0, 40);
       const patch: Partial<PublicProfile> = {
-        coins: profile.coins - price,
+        coins: profile.coins - item.price,
         unlockedItems: nextUnlocked,
       };
-      if (category === 'clothes') patch.outfit = itemId;
-      if (category === 'accessories') patch.accessory = itemId;
+      if (item.category === 'clothes') {
+        patch.outfit = item.id;
+        setPreviewOutfitId(null);
+      }
+      if (item.category === 'accessories') {
+        patch.accessory = item.id;
+        setPreviewAccessoryId(null);
+      }
       await onUpdateProfile(patch);
       setPetMessage(
-        category === 'furniture'
-          ? 'New room furniture unlocked! Passive room bonus activated!'
-          : 'New item unlocked and equipped!'
+        item.category === 'furniture'
+          ? `${item.name} unlocked and placed in your Pet Room!`
+          : `Unlocked & equipped ${item.name}!`
       );
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const handleTryOnItem = (item: ShopItem) => {
+    soundFx.playClick();
+    setSelectedShopItem(item);
+    if (item.category === 'clothes') {
+      setPreviewOutfitId(item.id);
+    } else if (item.category === 'accessories') {
+      setPreviewAccessoryId(item.id);
     }
   };
 
@@ -220,11 +831,27 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
       ? Math.round((profile.correctAnswers / profile.totalAnswers) * 100)
       : 0;
 
+  const displayedOutfit = previewOutfitId ?? profile.outfit;
+  const displayedAccessory = previewAccessoryId ?? profile.accessory;
+  const isPreviewingUnsaved =
+    (previewOutfitId !== null && previewOutfitId !== profile.outfit) ||
+    (previewAccessoryId !== null && previewAccessoryId !== profile.accessory);
+
   return (
     <div className="space-y-6">
+      {/* Floating Drag Ghost Layer */}
+      {dragState && (
+        <div
+          style={{ left: dragState.x, top: dragState.y }}
+          className="fixed z-50 -translate-x-1/2 -translate-y-1/2 pointer-events-none drop-shadow-xl scale-110"
+        >
+          <ShopItemVisual itemId={dragState.target.itemId} size={68} />
+        </div>
+      )}
+
       {/* Sub-navigation bar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-1 p-1 bg-[#EDE8D8] rounded-xl">
+        <div className="flex items-center gap-1 p-1 bg-[#EDE8D8] rounded-xl overflow-x-auto">
           {[
             { id: 'room', label: 'Pet Room' },
             { id: 'shop', label: 'SLA Shop' },
@@ -251,22 +878,22 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
           ))}
         </div>
 
-        <div className="flex items-center gap-5 text-sm tabular-nums">
+        <div className="flex items-center gap-4 text-sm tabular-nums">
           <div className="flex items-center gap-1.5 font-semibold text-[#172A1E]">
             <Coins className="w-4 h-4 text-[#EA7A26]" />
             <span>{profile.coins} Coins</span>
           </div>
           <span className="text-[#D4CCB5]" aria-hidden="true">|</span>
           <div className="font-semibold text-[#1E5B3A]">
-            Lv. {profile.petLevel} · {xpProgress}% XP
+            Lv. {profile.petLevel} · {profile.petXp}/{xpNeeded} XP
           </div>
         </div>
       </div>
 
       {subView === 'room' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-          {/* Left Stage: Pet Room */}
-          <div className="lg:col-span-7 relative rounded-3xl overflow-hidden border border-[#E5DEC9] bg-white min-h-[430px] flex flex-col justify-between">
+          {/* Left Stage: Interactive Pou-Inspired Pet Room */}
+          <div className="lg:col-span-7 relative rounded-3xl overflow-hidden border border-[#E5DEC9] bg-white min-h-[500px] flex flex-col justify-between select-none">
             <img
               src={
                 profile.isSleeping
@@ -277,31 +904,44 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
               referrerPolicy="no-referrer"
               className="absolute inset-0 w-full h-full object-cover"
             />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/10 to-black/25" />
+            <div
+              className={`absolute inset-0 transition-colors duration-300 ${
+                roomMode === 'wash'
+                  ? 'bg-gradient-to-t from-sky-950/65 via-sky-700/30 to-cyan-500/25'
+                  : profile.isSleeping
+                    ? 'bg-slate-950/45'
+                    : 'bg-gradient-to-t from-black/60 via-black/10 to-black/25'
+              }`}
+            />
 
             {/* Top HUD inside Room */}
-            <div className="relative z-10 p-5 flex items-center justify-between gap-4">
-              <div className="bg-white/95 rounded-2xl px-4 py-2.5 shadow-sm flex items-center gap-3">
+            <div className="relative z-10 p-4 sm:p-5 flex items-center justify-between gap-3">
+              <div className="bg-white/95 rounded-2xl px-3.5 py-2 shadow-sm flex items-center gap-3">
                 {profile.photoUrl && (
                   <img
                     src={profile.photoUrl}
                     alt={profile.displayName}
                     referrerPolicy="no-referrer"
-                    className="w-10 h-10 rounded-full object-cover border-2 border-[#1E5B3A] shrink-0"
+                    className="w-9 h-9 rounded-full object-cover border-2 border-[#1E5B3A] shrink-0"
                   />
                 )}
                 <div>
                   <p className="text-sm font-bold text-[#172A1E]">
                     {profile.petName}{' '}
                     <span className="font-normal text-xs text-[#4D6354] capitalize">
-                      · {profile.petSpecies} ({profile.role})
+                      · Lv. {profile.petLevel} {profile.petSpecies}
                     </span>
                   </p>
-                  <div className="w-36 h-1.5 bg-[#E6E0CE] rounded-full overflow-hidden mt-1.5">
-                    <div
-                      className="h-full bg-[#1E5B3A] rounded-full transition-all"
-                      style={{ width: `${xpProgress}%` }}
-                    />
+                  <div className="flex items-center gap-2 mt-1">
+                    <div className="w-28 sm:w-36 h-1.5 bg-[#E6E0CE] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#1E5B3A] rounded-full transition-all duration-300"
+                        style={{ width: `${xpProgress}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] font-semibold text-[#4D6354] tabular-nums">
+                      {profile.petXp}/{xpNeeded}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -315,61 +955,333 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                 className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold shadow-sm transition-colors cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-2"
               >
                 <Gamepad2 className="w-4 h-4" />
-                Play Quiz Games
+                Earn Coins &amp; XP
               </button>
             </div>
 
-            {/* Center Pet & Speech Bubble */}
-            <div className="relative z-10 flex flex-col items-center justify-end pb-6 px-4">
-              {(hasLeafBed || hasOrangeRug || hasStudyPlant) && (
-                <div className="flex flex-wrap items-center justify-center gap-1.5 mb-2">
-                  {hasLeafBed && (
-                    <span className="px-2.5 py-1 rounded-lg bg-white/90 text-[#1E5B3A] text-[11px] font-bold shadow-sm">
-                      Leafy Bed (+Rest)
-                    </span>
-                  )}
-                  {hasOrangeRug && (
-                    <span className="px-2.5 py-1 rounded-lg bg-white/90 text-[#C65B10] text-[11px] font-bold shadow-sm">
-                      Marigold Rug (+Cozy)
-                    </span>
-                  )}
-                  {hasStudyPlant && (
-                    <span className="px-2.5 py-1 rounded-lg bg-white/90 text-[#1E5B3A] text-[11px] font-bold shadow-sm">
-                      Monstera (+Joy)
-                    </span>
-                  )}
+            {/* Sickness Alert Banner */}
+            {healthState.isSick && (
+              <div className="relative z-10 mx-4 sm:mx-5 px-3.5 py-2 rounded-2xl bg-red-600/95 text-white text-xs font-semibold flex flex-wrap items-center justify-between gap-2 shadow-sm">
+                <span className="flex items-center gap-1.5">
+                  <HeartPulse className="w-4 h-4 shrink-0" />
+                  {profile.petName} is Sick ({healthState.reasons.join(' · ')})! Feed food, give a Bath, or use SLA Care Potion.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setShopCategory('food');
+                    setSubView('shop');
+                    onSetActivity?.(SUB_VIEW_ACTIVITY.shop);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-white text-red-700 text-[11px] font-bold hover:bg-red-50 cursor-pointer"
+                >
+                  Get Care Potion
+                </button>
+              </div>
+            )}
+
+            {/* Room Furniture & Bath Time Status */}
+            <div className="relative z-10 px-5 flex items-center justify-between pointer-events-none mt-2">
+              {ownedFurniture.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-1.5 bg-white/90 px-2.5 py-1.5 rounded-2xl shadow-xs max-w-[75%]">
+                  {ownedFurniture.map((furn) => (
+                    <ShopItemVisual key={furn.id} itemId={furn.id} size={26} />
+                  ))}
+                  <span className="text-[11px] font-bold text-[#1E5B3A] ml-1">
+                    {ownedFurniture.length} Room Item{ownedFurniture.length > 1 ? 's' : ''}
+                  </span>
+                </div>
+              ) : (
+                <span />
+              )}
+
+              {roomMode === 'wash' && (
+                <div className="bg-sky-50/95 border border-sky-200 px-3 py-1 rounded-xl text-[11px] font-bold text-sky-800 flex items-center gap-1.5 shadow-xs">
+                  <Sparkles className="w-3.5 h-3.5 text-sky-500" />
+                  Bath Time · Soap Foam {foamLevel}%
                 </div>
               )}
+            </div>
+
+            {/* Center Interactive Pet Stage (Drop Zone) */}
+            <div className="relative z-10 flex flex-col items-center justify-end pb-4 px-4 flex-1">
               <div className="bg-white/95 text-[#172A1E] text-xs font-medium px-4 py-2 rounded-2xl shadow-sm mb-2 max-w-sm text-center">
                 {petMessage}
               </div>
-              <PetAvatar
-                species={profile.petSpecies}
-                color={profile.petColor}
-                outfit={profile.outfit}
-                accessory={profile.accessory}
-                role={profile.role}
-                isSleeping={profile.isSleeping}
-                size={195}
-                className={profile.isSleeping ? '' : 'animate-float-gentle'}
-              />
+
+              <div
+                ref={petDropRef}
+                className={`relative flex items-center justify-center rounded-full transition-all ${
+                  isHoveringPet && dragState
+                    ? 'ring-4 ring-[#FACC15] bg-white/20 scale-105'
+                    : ''
+                }`}
+              >
+                {/* Drop Hint Badge */}
+                {isHoveringPet && dragState && (
+                  <span className="pointer-events-none absolute -top-7 z-30 px-3 py-1 rounded-lg bg-[#EA7A26] text-white text-xs font-extrabold shadow-sm whitespace-nowrap">
+                    {dragState.target.kind === 'food'
+                      ? 'Drop to Feed!'
+                      : dragState.target.kind === 'soap'
+                        ? 'Scrubbing Suds!'
+                        : 'Release to Rinse!'}
+                  </span>
+                )}
+
+                {/* Floating feedback badges */}
+                {particles.map((pt) => (
+                  <span
+                    key={pt.id}
+                    style={{ marginLeft: `${pt.xOffset}px` }}
+                    className={`pointer-events-none absolute -top-2 z-20 px-2.5 py-1 rounded-lg text-xs font-extrabold shadow-sm animate-float-feedback whitespace-nowrap ${
+                      pt.tone === 'green'
+                        ? 'bg-[#1E5B3A] text-white'
+                        : pt.tone === 'orange'
+                          ? 'bg-[#EA7A26] text-white'
+                          : pt.tone === 'sky'
+                            ? 'bg-sky-500 text-white'
+                            : 'bg-rose-500 text-white'
+                    }`}
+                  >
+                    {pt.text}
+                  </span>
+                ))}
+
+                {/* Flying Food Visual when feeding */}
+                {feedingVisualId && (
+                  <div className="pointer-events-none absolute z-20 -bottom-1 animate-bounce">
+                    <ShopItemVisual itemId={feedingVisualId} size={56} />
+                  </div>
+                )}
+
+                {/* Bouncy Toy Ball in Play Mode */}
+                {roomMode === 'play' && (
+                  <button
+                    type="button"
+                    onClick={() => void handlePlayBall()}
+                    style={{ left: `${ballPos.x}%`, top: `${ballPos.y}%` }}
+                    aria-label="Bounce toy ball"
+                    className="absolute z-20 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-gradient-to-br from-[#EA7A26] to-[#FACC15] border-2 border-[#2C2A24] shadow-md transition-all duration-300 hover:scale-110 active:scale-95 cursor-pointer flex items-center justify-center"
+                  >
+                    <span className="w-5 h-5 rounded-full border-2 border-white/80" />
+                  </button>
+                )}
+
+                {/* Interactive Pet Button */}
+                <button
+                  type="button"
+                  onClick={() => void handleDirectPetTap()}
+                  aria-label={`Interact with ${profile.petName}`}
+                  className="relative rounded-full p-2 transition-transform focus:outline-none cursor-pointer hover:scale-[1.03] active:scale-95"
+                >
+                  <div key={bounceKey} className={bounceKey > 0 ? 'animate-pet-bounce' : ''}>
+                    <PetAvatar
+                      species={profile.petSpecies}
+                      color={profile.petColor}
+                      outfit={profile.outfit}
+                      accessory={profile.accessory}
+                      role={profile.role}
+                      isSleeping={profile.isSleeping}
+                      mood={activeMood}
+                      cleanliness={profile.cleanliness}
+                      foamLevel={roomMode === 'wash' ? foamLevel : 0}
+                      size={195}
+                      className={profile.isSleeping ? '' : 'animate-float-gentle'}
+                    />
+                  </div>
+                </button>
+              </div>
+
+              <p className="text-[11px] font-semibold text-white/95 drop-shadow-xs mt-1 text-center">
+                {roomMode === 'pet' && `Tap ${profile.petName} to pat & cheer up`}
+                {roomMode === 'feed' && `Drag any food or drink onto ${profile.petName} (or tap to serve)`}
+                {roomMode === 'play' && 'Tap the bouncy ball or your pet to play fetch!'}
+                {roomMode === 'wash' && `Drag the Soap Bar to lather foam, then drag the Shower Head to rinse!`}
+              </p>
             </div>
+
+            {/* Bottom Pou-Style Interactive Food & Drink Pantry Drawer */}
+            {roomMode === 'feed' && (
+              <div className="relative z-20 bg-white/95 border-t border-[#E5DEC9] px-4 py-3">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <span className="text-xs font-bold text-[#172A1E]">
+                    Drag Food &amp; Drinks to {profile.petName} ({totalFoodCount} in pantry)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      setShopCategory('food');
+                      setSubView('shop');
+                      onSetActivity?.(SUB_VIEW_ACTIVITY.shop);
+                    }}
+                    className="text-xs font-bold text-[#EA7A26] hover:text-[#C65B10] flex items-center gap-1 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Buy Food &amp; Drinks
+                  </button>
+                </div>
+
+                {ownedFoods.length > 0 ? (
+                  <div className="flex items-center gap-2.5 overflow-x-auto pb-1 touch-none">
+                    {ownedFoods.map((food) => {
+                      const qty = foodInventory[food.id] ?? 0;
+                      return (
+                        <button
+                          key={food.id}
+                          type="button"
+                          disabled={actionBusy}
+                          onPointerDown={(e) =>
+                            startPointerDrag(e, { kind: 'food', itemId: food.id })
+                          }
+                          className="shrink-0 flex items-center gap-2 px-3 py-2 rounded-xl border border-[#E5DEC9] bg-[#FAF8F2] hover:border-[#1E5B3A] hover:bg-white transition-colors cursor-grab active:cursor-grabbing disabled:opacity-50 select-none"
+                        >
+                          <ShopItemVisual itemId={food.id} size={38} />
+                          <div className="text-left">
+                            <p className="text-xs font-bold text-[#172A1E] whitespace-nowrap">
+                              {food.name}{' '}
+                              <span className="text-[#EA7A26] tabular-nums">×{qty}</span>
+                            </p>
+                            <p className="text-[11px] text-[#4D6354] tabular-nums">
+                              {food.isMedicine
+                                ? 'Cures Sickness!'
+                                : food.isDrink
+                                  ? `+${food.energyBoost ?? 0}% Energy · +${food.hungerBoost ?? 0}% Hunger`
+                                  : `+${food.hungerBoost ?? 0}% Hunger`}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-2 py-1">
+                    <p className="text-xs text-[#4D6354]">
+                      Your pantry is empty! Buy food, drinks, or Care Potion in the SLA Shop.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      {profile.hunger < 30 && profile.coins < 25 && (
+                        <button
+                          type="button"
+                          disabled={actionBusy}
+                          onPointerDown={(e) =>
+                            startPointerDrag(e, {
+                              kind: 'food',
+                              itemId: 'food_cracker',
+                              isEmergency: true,
+                            })
+                          }
+                          className="px-3 py-1.5 rounded-lg border border-[#1E5B3A] text-[#1E5B3A] text-xs font-bold hover:bg-[#1E5B3A]/5 cursor-grab flex items-center gap-1.5 touch-none"
+                        >
+                          <ShopItemVisual itemId="food_cracker" size={22} />
+                          Drag Emergency Cracker (+14%)
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          soundFx.playClick();
+                          setShopCategory('food');
+                          setSubView('shop');
+                          onSetActivity?.(SUB_VIEW_ACTIVITY.shop);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-[#EA7A26] text-white text-xs font-bold hover:bg-[#D46818] cursor-pointer"
+                      >
+                        Go to Food Shop
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Bottom Bath Time Interactive Dock */}
+            {roomMode === 'wash' && (
+              <div className="relative z-20 bg-white/95 border-t border-sky-200 px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-[#172A1E]">
+                      Bath Time Station · Scrub with Soap, then Rinse with Shower
+                    </p>
+                    <p className="text-[11px] text-[#4D6354]">
+                      Drag either tool over {profile.petName} (or tap to use). Foam bonus at 60%+!
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2.5 touch-none">
+                    <button
+                      type="button"
+                      disabled={actionBusy}
+                      onPointerDown={(e) =>
+                        startPointerDrag(e, { kind: 'soap', itemId: 'tool_soap' })
+                      }
+                      className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-pink-300 bg-pink-50 hover:bg-pink-100 text-xs font-bold text-pink-900 cursor-grab active:cursor-grabbing select-none"
+                    >
+                      <ShopItemVisual itemId="tool_soap" size={30} />
+                      Soap Bar ({foamLevel}%)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actionBusy}
+                      onPointerDown={(e) =>
+                        startPointerDrag(e, { kind: 'shower', itemId: 'tool_shower' })
+                      }
+                      className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-sky-300 bg-sky-50 hover:bg-sky-100 text-xs font-bold text-sky-900 cursor-grab active:cursor-grabbing select-none"
+                    >
+                      <ShopItemVisual itemId="tool_shower" size={30} />
+                      Shower Rinse
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Right Deck: Care Meters & Actions */}
+          {/* Right Deck: Care Meters & Interactive Pou Tools */}
           <div className="lg:col-span-5 bg-white rounded-3xl border border-[#E5DEC9] p-6 flex flex-col justify-between">
             <div>
-              <h3 className="text-lg font-bold text-[#172A1E]">Feed &amp; Care Status</h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-lg font-bold text-[#172A1E]">Companion Health &amp; Care</h3>
+                <span
+                  className={`text-xs font-bold px-2.5 py-0.5 rounded-lg ${
+                    healthState.isSick
+                      ? 'bg-red-100 text-red-700'
+                      : 'bg-emerald-50 text-[#1E5B3A]'
+                  }`}
+                >
+                  {healthState.isSick ? 'Sick' : 'Healthy'}
+                </span>
+              </div>
               <p className="text-xs text-[#4D6354] mt-1">
-                Teachers monitor your pet level and daily care alongside quiz accuracy.
+                Neglected pets lose energy and get sick! Drag food, give Bath Time, and play quizzes to level up and unlock expensive gear.
               </p>
 
               <div className="space-y-4 mt-6">
                 {[
-                  { label: 'Hunger', value: Math.min(100, Math.max(0, profile.hunger)), color: 'bg-[#2E7D32]', status: profile.hunger >= 50 ? 'Satisfied' : 'Hungry' },
-                  { label: 'Happiness', value: Math.min(100, Math.max(0, profile.happiness)), color: 'bg-[#EA7A26]', status: profile.happiness >= 50 ? 'Cheerful' : 'Needs Play' },
-                  { label: 'Energy', value: Math.min(100, Math.max(0, profile.energy)), color: 'bg-[#F59E0B]', status: profile.energy >= 45 ? 'Energetic' : 'Sleepy' },
-                  { label: 'Cleanliness', value: Math.min(100, Math.max(0, profile.cleanliness)), color: 'bg-[#0EA5E9]', status: profile.cleanliness >= 50 ? 'Neat Uniform' : 'Needs Wash' },
+                  {
+                    label: 'Hunger',
+                    value: Math.min(100, Math.max(0, profile.hunger)),
+                    color: profile.hunger < 28 ? 'bg-red-500' : 'bg-[#2E7D32]',
+                    status: profile.hunger >= 50 ? 'Satisfied' : profile.hunger < 25 ? 'Starving!' : 'Hungry',
+                  },
+                  {
+                    label: 'Happiness',
+                    value: Math.min(100, Math.max(0, profile.happiness)),
+                    color: profile.happiness < 25 ? 'bg-red-500' : 'bg-[#EA7A26]',
+                    status: profile.happiness >= 50 ? 'Cheerful' : 'Needs Play',
+                  },
+                  {
+                    label: 'Energy',
+                    value: Math.min(100, Math.max(0, profile.energy)),
+                    color: profile.energy < 22 ? 'bg-red-500' : 'bg-[#F59E0B]',
+                    status: profile.energy >= 45 ? 'Energetic' : 'Sleepy',
+                  },
+                  {
+                    label: 'Cleanliness',
+                    value: Math.min(100, Math.max(0, profile.cleanliness)),
+                    color: profile.cleanliness < 28 ? 'bg-red-500' : 'bg-[#0EA5E9]',
+                    status: profile.cleanliness >= 50 ? 'Fresh & Clean' : 'Needs Bath!',
+                  },
                 ].map((stat) => (
                   <div key={stat.label}>
                     <div className="flex items-center justify-between text-xs mb-1.5">
@@ -389,41 +1301,82 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
               </div>
             </div>
 
-            <div className="mt-6 pt-5 border-t border-[#ECE7D8]">
-              <p className="text-xs font-semibold text-[#4D6354] mb-3">Quick Care Actions (+15 XP each)</p>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="mt-6 pt-5 border-t border-[#ECE7D8] space-y-3">
+              <p className="text-xs font-semibold text-[#4D6354]">Interactive Pet Tools</p>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 <button
                   type="button"
-                  disabled={actionBusy}
-                  onClick={() => void applyCareAction('feed')}
-                  className="py-3 px-2 rounded-xl border border-[#E5DEC9] hover:border-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-semibold text-[#172A1E] flex flex-col items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setRoomMode('pet');
+                    setPetMessage(`Tap ${profile.petName} directly to pat and make it blush!`);
+                  }}
+                  className={`py-2.5 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                    roomMode === 'pet'
+                      ? 'border-[#1E5B3A] bg-[#1E5B3A]/10 text-[#1E5B3A]'
+                      : 'border-[#E5DEC9] text-[#172A1E] hover:bg-[#FAF8F2]'
+                  }`}
+                >
+                  <Hand className="w-4 h-4 text-[#1E5B3A]" />
+                  Pat
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setRoomMode('feed');
+                    setPetMessage(`Drag food or drinks onto ${profile.petName} from the pantry!`);
+                  }}
+                  className={`py-2.5 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                    roomMode === 'feed'
+                      ? 'border-[#2E7D32] bg-[#2E7D32]/10 text-[#1E5B3A]'
+                      : 'border-[#E5DEC9] text-[#172A1E] hover:bg-[#FAF8F2]'
+                  }`}
                 >
                   <Utensils className="w-4 h-4 text-[#2E7D32]" />
-                  Feed
+                  Feed ({totalFoodCount})
                 </button>
+
                 <button
                   type="button"
-                  disabled={actionBusy}
-                  onClick={() => void applyCareAction('play')}
-                  className="py-3 px-2 rounded-xl border border-[#E5DEC9] hover:border-[#EA7A26] hover:bg-[#EA7A26]/5 text-xs font-semibold text-[#172A1E] flex flex-col items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setRoomMode('play');
+                    setPetMessage('Tap the bouncy ball in the room to play fetch!');
+                  }}
+                  className={`py-2.5 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                    roomMode === 'play'
+                      ? 'border-[#EA7A26] bg-[#EA7A26]/10 text-[#C65B10]'
+                      : 'border-[#E5DEC9] text-[#172A1E] hover:bg-[#FAF8F2]'
+                  }`}
                 >
                   <Gamepad2 className="w-4 h-4 text-[#EA7A26]" />
-                  Play Toy
+                  Play Ball
                 </button>
+
                 <button
                   type="button"
-                  disabled={actionBusy}
-                  onClick={() => void applyCareAction('clean')}
-                  className="py-3 px-2 rounded-xl border border-[#E5DEC9] hover:border-[#0EA5E9] hover:bg-sky-50 text-xs font-semibold text-[#172A1E] flex flex-col items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setRoomMode('wash');
+                    setPetMessage(`Bath Time! Drag the Soap Bar over ${profile.petName}, then rinse with the Shower Head!`);
+                  }}
+                  className={`py-2.5 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                    roomMode === 'wash'
+                      ? 'border-sky-500 bg-sky-50 text-sky-700'
+                      : 'border-[#E5DEC9] text-[#172A1E] hover:bg-[#FAF8F2]'
+                  }`}
                 >
-                  <Sparkles className="w-4 h-4 text-[#0EA5E9]" />
-                  Clean
+                  <Bath className="w-4 h-4 text-sky-500" />
+                  Bath Time
                 </button>
+
                 <button
                   type="button"
                   disabled={actionBusy}
-                  onClick={() => void applyCareAction('sleep')}
-                  className={`py-3 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                  onClick={() => void handleToggleSleep()}
+                  className={`py-2.5 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-colors cursor-pointer disabled:opacity-50 col-span-2 sm:col-span-1 ${
                     profile.isSleeping
                       ? 'border-[#EA7A26] bg-[#EA7A26]/10 text-[#C65B10]'
                       : 'border-[#E5DEC9] hover:border-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-[#172A1E]'
@@ -434,7 +1387,7 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                   ) : (
                     <Moon className="w-4 h-4 text-[#1E5B3A]" />
                   )}
-                  {profile.isSleeping ? 'Wake Up' : 'Sleep'}
+                  {profile.isSleeping ? 'Wake' : 'Sleep'}
                 </button>
               </div>
             </div>
@@ -443,7 +1396,7 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
       )}
 
       {subView === 'shop' && (
-        <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8">
+        <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[#ECE7D8]">
             <div>
               <h3 className="text-xl font-bold text-[#172A1E] flex items-center gap-2">
@@ -451,57 +1404,222 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                 San Lorenzo Academy Shop
               </h3>
               <p className="text-xs text-[#4D6354] mt-1">
-                Earn LorenCoins from quiz games to unlock uniforms, accessories, and cozy room furniture.
+                Level up your pet and save Coins from quizzes to unlock premium foods, drinks, outfits, accessories, and furniture.
               </p>
             </div>
-            <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9]">
-              {(['clothes', 'accessories', 'furniture'] as const).map((cat) => (
+            <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9]">
+              {(
+                [
+                  { id: 'food', label: 'Foods, Drinks & Meds' },
+                  { id: 'clothes', label: 'Clothes' },
+                  { id: 'accessories', label: 'Accessories' },
+                  { id: 'furniture', label: 'Furniture' },
+                ] as const
+              ).map((cat) => (
                 <button
-                  key={cat}
+                  key={cat.id}
                   type="button"
                   onClick={() => {
                     soundFx.playClick();
-                    setShopCategory(cat);
+                    setShopCategory(cat.id);
+                    const firstInCat = SHOP_ITEMS.find((i) => i.category === cat.id);
+                    if (firstInCat) setSelectedShopItem(firstInCat);
                   }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize cursor-pointer transition-colors ${
-                    shopCategory === cat ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                    shopCategory === cat.id ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
                   }`}
                 >
-                  {cat}
+                  {cat.label}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
-            {SHOP_ITEMS.filter((i) => i.category === shopCategory).map((item) => {
-              const owned = profile.unlockedItems.includes(item.id) || item.price === 0;
-              const equipped = profile.outfit === item.id || profile.accessory === item.id;
-              return (
-                <div
-                  key={item.id}
-                  className="rounded-2xl border border-[#E5DEC9] p-5 flex flex-col justify-between bg-[#FAF8F2]/50"
-                >
-                  <div>
-                    <div
-                      className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg mb-3"
-                      style={{ backgroundColor: item.previewColor }}
+          {/* Live Try-On & Item Preview Stage */}
+          <div className="rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] p-5 grid grid-cols-1 md:grid-cols-12 gap-5 items-center">
+            <div className="md:col-span-5 flex items-center justify-center gap-4 bg-white rounded-2xl border border-[#ECE7D8] p-4 relative">
+              <PetAvatar
+                species={profile.petSpecies}
+                color={profile.petColor}
+                outfit={displayedOutfit}
+                accessory={displayedAccessory}
+                role={profile.role}
+                mood={selectedShopItem.category === 'food' ? 'happy' : 'excited'}
+                cleanliness={profile.cleanliness}
+                size={148}
+                className="animate-float-gentle"
+              />
+              {selectedShopItem.category === 'food' || selectedShopItem.category === 'furniture' ? (
+                <div className="flex flex-col items-center">
+                  <ShopItemVisual itemId={selectedShopItem.id} size={76} />
+                  <span className="text-[11px] font-bold text-[#4D6354] mt-1">Item Preview</span>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="md:col-span-7 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-[#EA7A26]">
+                    Live Fitting &amp; Unlock Preview · Requires Lv. {selectedShopItem.requiredLevel}
+                  </p>
+                  <h4 className="text-lg font-extrabold text-[#172A1E]">{selectedShopItem.name}</h4>
+                </div>
+                {isPreviewingUnsaved && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      setPreviewOutfitId(null);
+                      setPreviewAccessoryId(null);
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-[#D8D0BC] bg-white text-xs font-semibold text-[#4D6354] hover:text-[#172A1E] flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reset Preview
+                  </button>
+                )}
+              </div>
+
+              <p className="text-xs text-[#4D6354] leading-relaxed">{selectedShopItem.description}</p>
+
+              {selectedShopItem.category === 'food' && (
+                <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-[#1E5B3A] tabular-nums">
+                  {selectedShopItem.hungerBoost && <span>+{selectedShopItem.hungerBoost}% Hunger</span>}
+                  {selectedShopItem.happinessBoost && <span>+{selectedShopItem.happinessBoost}% Joy</span>}
+                  {selectedShopItem.energyBoost ? <span>+{selectedShopItem.energyBoost}% Energy</span> : null}
+                  {selectedShopItem.cleanlinessBoost ? <span>+{selectedShopItem.cleanlinessBoost}% Clean</span> : null}
+                  {selectedShopItem.xpBoost && <span>+{selectedShopItem.xpBoost} XP</span>}
+                  <span className="text-[#EA7A26]">
+                    In Pantry: ×{foodInventory[selectedShopItem.id] ?? 0}
+                  </span>
+                </div>
+              )}
+
+              <div className="pt-1 flex flex-wrap items-center gap-2.5">
+                {profile.petLevel < selectedShopItem.requiredLevel ? (
+                  <span className="px-4 py-2 rounded-xl bg-stone-200 text-stone-700 text-xs font-bold flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5" />
+                    Unlocks at Level {selectedShopItem.requiredLevel} (You are Lv. {profile.petLevel})
+                  </span>
+                ) : selectedShopItem.category === 'food' ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={actionBusy}
+                      onClick={() => void handleBuyFood(selectedShopItem, 1)}
+                      className="px-4 py-2 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer disabled:opacity-50"
                     >
-                      {item.name.slice(0, 1)}
-                    </div>
-                    <h4 className="font-bold text-sm text-[#172A1E]">{item.name}</h4>
-                    <p className="text-xs text-[#4D6354] mt-1 leading-relaxed">{item.description}</p>
-                  </div>
+                      Buy 1 · {selectedShopItem.price} Coins
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actionBusy}
+                      onClick={() => void handleBuyFood(selectedShopItem, 3)}
+                      className="px-4 py-2 rounded-xl border border-[#EA7A26] text-[#C65B10] hover:bg-[#EA7A26]/10 text-xs font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      Buy 3 · {selectedShopItem.price * 3} Coins
+                    </button>
+                  </>
+                ) : (
                   <button
                     type="button"
                     disabled={actionBusy}
-                    onClick={() => void handleBuyOrEquip(item.id, item.category, item.price)}
-                    className={`mt-5 w-full py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                    onClick={() => void handleBuyOrEquip(selectedShopItem)}
+                    className="px-4 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                  >
+                    {profile.outfit === selectedShopItem.id || profile.accessory === selectedShopItem.id
+                      ? 'Currently Equipped'
+                      : profile.unlockedItems.includes(selectedShopItem.id) || selectedShopItem.price === 0
+                        ? selectedShopItem.category === 'furniture'
+                          ? 'Active in Room'
+                          : 'Equip Now'
+                        : `Buy ${selectedShopItem.name} · ${selectedShopItem.price} Coins`}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Visible Item Cards Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {SHOP_ITEMS.filter((i) => i.category === shopCategory).map((item) => {
+              const isFood = item.category === 'food';
+              const owned = !isFood && (profile.unlockedItems.includes(item.id) || item.price === 0);
+              const equipped = !isFood && (profile.outfit === item.id || profile.accessory === item.id);
+              const isSelected = selectedShopItem.id === item.id;
+              const foodQty = foodInventory[item.id] ?? 0;
+              const levelLocked = !owned && profile.petLevel < item.requiredLevel;
+
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleTryOnItem(item)}
+                  className={`rounded-2xl border p-4 flex flex-col justify-between transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'border-[#1E5B3A] bg-white shadow-sm'
+                      : 'border-[#E5DEC9] bg-[#FAF8F2]/60 hover:bg-white'
+                  }`}
+                >
+                  <div>
+                    {/* Visible Item Artwork Stage */}
+                    <div className="w-full h-28 rounded-xl bg-white border border-[#ECE7D8] flex items-center justify-center relative mb-3">
+                      <ShopItemVisual itemId={item.id} size={82} />
+                      <span
+                        className={`absolute top-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold tabular-nums ${
+                          levelLocked
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-[#FAF8F2] text-[#4D6354] border border-[#E5DEC9]'
+                        }`}
+                      >
+                        Lv. {item.requiredLevel}
+                      </span>
+                      {isFood && foodQty > 0 && (
+                        <span className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-[#1E5B3A] text-white text-[11px] font-bold tabular-nums">
+                          ×{foodQty}
+                        </span>
+                      )}
+                      {!isFood && (item.category === 'clothes' || item.category === 'accessories') && (
+                        <span className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-[#FAF8F2] border border-[#E5DEC9] text-[10px] font-bold text-[#4D6354] flex items-center gap-1">
+                          <Eye className="w-3 h-3" />
+                          Try On
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="font-bold text-sm text-[#172A1E]">{item.name}</h4>
+                      {item.isMedicine ? (
+                        <span className="text-[10px] font-bold text-emerald-700">Medicine</span>
+                      ) : item.isDrink ? (
+                        <span className="text-[10px] font-bold text-sky-700">Drink</span>
+                      ) : null}
+                    </div>
+                    <p className="text-xs text-[#4D6354] mt-1 leading-relaxed">{item.description}</p>
+                    {isFood && (
+                      <p className="text-[11px] font-semibold text-[#1E5B3A] mt-2 tabular-nums">
+                        +{item.hungerBoost}% Hunger · +{item.happinessBoost}% Joy
+                        {item.energyBoost ? ` · +${item.energyBoost}% Energy` : ''}
+                      </p>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={actionBusy || levelLocked}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedShopItem(item);
+                      void handleBuyOrEquip(item);
+                    }}
+                    className={`mt-4 w-full py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60 ${
                       equipped
                         ? 'bg-[#1E5B3A] text-white'
-                        : owned
-                        ? 'bg-white border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5'
-                        : 'bg-[#EA7A26] hover:bg-[#D46818] text-white'
+                        : levelLocked
+                          ? 'bg-stone-200 text-stone-700 cursor-not-allowed'
+                          : owned
+                            ? 'bg-white border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5'
+                            : 'bg-[#EA7A26] hover:bg-[#D46818] text-white'
                     }`}
                   >
                     {equipped ? (
@@ -509,11 +1627,16 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                         <Check className="w-3.5 h-3.5" />
                         Equipped
                       </>
+                    ) : levelLocked ? (
+                      <>
+                        <Lock className="w-3.5 h-3.5" />
+                        Unlock at Lv. {item.requiredLevel}
+                      </>
                     ) : owned ? (
                       item.category === 'furniture' ? 'Active in Room' : 'Equip Item'
                     ) : (
                       <>
-                        <Lock className="w-3.5 h-3.5" />
+                        <ShoppingBag className="w-3.5 h-3.5" />
                         Buy · {item.price} Coins
                       </>
                     )}
@@ -534,6 +1657,8 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
               outfit={profile.outfit}
               accessory={profile.accessory}
               role={profile.role}
+              cleanliness={profile.cleanliness}
+              mood={healthState.isSick ? 'sick' : 'happy'}
               size={200}
               className="animate-float-gentle"
             />

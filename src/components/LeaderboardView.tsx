@@ -26,6 +26,7 @@ import { downloadLeaderboardCsv } from '../lib/pptxParser';
 import { getStudentPresence } from '../lib/presence';
 import { PetAvatar } from './PetAvatar';
 import { soundFx } from '../lib/sound';
+import { xpRequiredForLevel } from '../lib/progression';
 
 interface LeaderboardViewProps {
   profiles: PublicProfile[];
@@ -56,6 +57,15 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const isFaculty = currentRole === 'teacher' || currentRole === 'admin';
+  const isAdminView = currentRole === 'admin';
+
+  const getInitials = (name: string) =>
+    name
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() || '')
+      .join('') || 'SL';
 
   useEffect(() => {
     if (!isFaculty) return;
@@ -123,12 +133,13 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
     const q = searchQuery.trim().toLowerCase();
     const students = profiles.filter((p) => {
       if (p.role !== 'student') return false;
+      if (p.approvalStatus !== 'approved') return false;
       if (sectionFilter !== 'All' && (p.section || '') !== sectionFilter) return false;
       if (!q) return true;
       return (
         p.displayName.toLowerCase().includes(q) ||
-        p.petName.toLowerCase().includes(q) ||
-        p.petSpecies.toLowerCase().includes(q) ||
+        (!isAdminView && p.petName.toLowerCase().includes(q)) ||
+        (!isAdminView && p.petSpecies.toLowerCase().includes(q)) ||
         (p.section || '').toLowerCase().includes(q)
       );
     });
@@ -182,9 +193,11 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
             Automatic Quiz Leaderboard
           </h2>
           <p className="text-xs text-[#4D6354] mt-1">
-            {isFaculty
-              ? 'Click any student on the leaderboard to inspect their full pet care progress, section, and quiz history.'
-              : 'Scores are recorded automatically from all 11 mini-games. Student emails remain private.'}
+            {isAdminView
+              ? 'Click any approved student to inspect their classroom section and score history.'
+              : isFaculty
+                ? 'Click any student on the leaderboard to inspect their full pet care progress, section, and quiz history.'
+                : 'Scores are recorded automatically from all 11 mini-games. Student emails remain private.'}
           </p>
         </div>
 
@@ -195,8 +208,8 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search student or pet..."
-              aria-label="Search student or pet"
+              placeholder={isAdminView ? 'Search student or section...' : 'Search student or pet...'}
+              aria-label={isAdminView ? 'Search student or section' : 'Search student or pet'}
               className="pl-8 pr-3 py-2 rounded-xl border border-[#D8D0BC] text-xs bg-white focus:outline-none focus:border-[#1E5B3A] w-44"
             />
           </div>
@@ -283,22 +296,28 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                 } ${isFaculty ? 'cursor-pointer hover:bg-[#FAF8F2]' : ''}`}
               >
                 <div className="relative shrink-0 flex items-center gap-2">
-                  {isFaculty && student.photoUrl && (
+                  {isFaculty && student.photoUrl ? (
                     <img
                       src={student.photoUrl}
                       alt={student.displayName}
                       referrerPolicy="no-referrer"
-                      className="w-12 h-12 rounded-full object-cover border-2 border-[#1E5B3A] shrink-0"
+                      className={`${isAdminView ? 'w-14 h-14' : 'w-12 h-12'} rounded-full object-cover border-2 border-[#1E5B3A] shrink-0`}
+                    />
+                  ) : isAdminView ? (
+                    <div className="w-14 h-14 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border-2 border-[#1E5B3A]/30 flex items-center justify-center font-extrabold text-base shrink-0">
+                      {getInitials(student.displayName)}
+                    </div>
+                  ) : null}
+                  {!isAdminView && (
+                    <PetAvatar
+                      species={student.petSpecies}
+                      color={student.petColor}
+                      outfit={student.outfit}
+                      accessory={student.accessory}
+                      role={student.role}
+                      size={isFaculty && student.photoUrl ? 62 : 76}
                     />
                   )}
-                  <PetAvatar
-                    species={student.petSpecies}
-                    color={student.petColor}
-                    outfit={student.outfit}
-                    accessory={student.accessory}
-                    role={student.role}
-                    size={isFaculty && student.photoUrl ? 62 : 76}
-                  />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
@@ -329,7 +348,9 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                     {student.displayName}
                   </p>
                   <p className="text-xs text-[#4D6354] truncate">
-                    {student.petName} · Lv. {student.petLevel}
+                    {isAdminView
+                      ? student.section || 'San Lorenzo Academy'
+                      : `${student.petName} · Lv. ${student.petLevel}`}
                   </p>
                   <div className="flex items-center justify-between mt-1">
                     <p className="text-lg font-extrabold text-[#1E5B3A] tabular-nums">
@@ -360,8 +381,8 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
               <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
                 <th className="py-3 pr-4 font-semibold">Rank</th>
                 <th className="py-3 pr-4 font-semibold">Student</th>
-                <th className="py-3 pr-4 font-semibold">Pet Companion</th>
-                <th className="py-3 pr-4 font-semibold">Pet Level</th>
+                {!isAdminView && <th className="py-3 pr-4 font-semibold">Pet Companion</th>}
+                {!isAdminView && <th className="py-3 pr-4 font-semibold">Pet Level</th>}
                 <th className="py-3 pr-4 font-semibold">Accuracy</th>
                 <th className="py-3 pr-4 font-semibold text-right">Score</th>
                 {isFaculty && <th className="py-3 pr-4 font-semibold">Status</th>}
@@ -398,6 +419,10 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                             referrerPolicy="no-referrer"
                             className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A] shrink-0"
                           />
+                        ) : isAdminView ? (
+                          <div className="w-9 h-9 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border border-[#1E5B3A]/20 flex items-center justify-center font-bold text-xs shrink-0">
+                            {getInitials(student.displayName)}
+                          </div>
                         ) : (
                           <PetAvatar
                             species={student.petSpecies}
@@ -419,10 +444,14 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 pr-4 text-[#4D6354] capitalize">
-                      {student.petName} · {student.petSpecies}
-                    </td>
-                    <td className="py-3 pr-4 tabular-nums text-[#4D6354]">Lv. {student.petLevel}</td>
+                    {!isAdminView && (
+                      <td className="py-3 pr-4 text-[#4D6354] capitalize">
+                        {student.petName} · {student.petSpecies}
+                      </td>
+                    )}
+                    {!isAdminView && (
+                      <td className="py-3 pr-4 tabular-nums text-[#4D6354]">Lv. {student.petLevel}</td>
+                    )}
                     <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{acc}%</td>
                     <td className="py-3 pr-4 font-bold text-[#1E5B3A] text-right tabular-nums">
                       {scoreVal.toLocaleString()}
@@ -469,35 +498,43 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
           <div className="bg-white rounded-3xl border border-[#E5DEC9] max-w-2xl w-full p-6 sm:p-7 shadow-xl max-h-[88vh] overflow-y-auto space-y-6">
             <div className="flex items-start justify-between gap-4 pb-4 border-b border-[#ECE7D8]">
               <div className="flex items-center gap-4">
-                {selectedStudent.photoUrl && (
+                {selectedStudent.photoUrl ? (
                   <img
                     src={selectedStudent.photoUrl}
                     alt={selectedStudent.displayName}
                     referrerPolicy="no-referrer"
                     className="w-20 h-20 rounded-full object-cover border-2 border-[#1E5B3A] shrink-0 shadow-sm"
                   />
+                ) : isAdminView ? (
+                  <div className="w-20 h-20 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border-2 border-[#1E5B3A]/30 flex items-center justify-center font-extrabold text-xl shrink-0">
+                    {getInitials(selectedStudent.displayName)}
+                  </div>
+                ) : null}
+                {!isAdminView && (
+                  <div className="p-2 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9]">
+                    <PetAvatar
+                      species={selectedStudent.petSpecies}
+                      color={selectedStudent.petColor}
+                      outfit={selectedStudent.outfit}
+                      accessory={selectedStudent.accessory}
+                      role={selectedStudent.role}
+                      size={76}
+                    />
+                  </div>
                 )}
-                <div className="p-2 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9]">
-                  <PetAvatar
-                    species={selectedStudent.petSpecies}
-                    color={selectedStudent.petColor}
-                    outfit={selectedStudent.outfit}
-                    accessory={selectedStudent.accessory}
-                    role={selectedStudent.role}
-                    size={76}
-                  />
-                </div>
                 <div>
                   <p className="text-xs font-semibold text-[#EA7A26]">
-                    Faculty Student Profile Inspector
+                    {isAdminView ? 'Administrator Student Record' : 'Faculty Student Profile Inspector'}
                   </p>
                   <h3 className="text-xl font-extrabold text-[#172A1E]">
                     {selectedStudent.displayName}
                   </h3>
-                  <p className="text-xs text-[#4D6354] mt-0.5 capitalize">
-                    Pet: <strong>{selectedStudent.petName}</strong> ({selectedStudent.petSpecies}) ·
-                    Lv. {selectedStudent.petLevel}
-                  </p>
+                  {!isAdminView && (
+                    <p className="text-xs text-[#4D6354] mt-0.5 capitalize">
+                      Pet: <strong>{selectedStudent.petName}</strong> ({selectedStudent.petSpecies}) ·
+                      Lv. {selectedStudent.petLevel}
+                    </p>
+                  )}
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="text-xs text-[#4D6354] mt-0.5">
                       {loadingPrivateInfo
@@ -570,77 +607,81 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
               </div>
             </div>
 
-            {/* Pet Care Progress (Teacher Progress Basis) */}
-            <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-[#EA7A26]" />
-                  Pet Care Progress
-                </h4>
-                <span className="text-xs font-semibold text-[#1E5B3A] tabular-nums">
-                  {selectedStudent.petXp} / {selectedStudent.petLevel * 100} XP
-                </span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                {[
-                  { label: 'Hunger', val: selectedStudent.hunger },
-                  { label: 'Happiness', val: selectedStudent.happiness },
-                  { label: 'Energy', val: selectedStudent.energy },
-                  { label: 'Cleanliness', val: selectedStudent.cleanliness },
-                ].map((stat) => (
-                  <div key={stat.label} className="bg-white rounded-xl p-2.5 border border-[#ECE7D8]">
-                    <div className="flex items-center justify-between font-semibold text-[#172A1E] mb-1">
-                      <span>{stat.label}</span>
-                      <span className="tabular-nums">{stat.val}%</span>
+            {/* Pet Care Progress (Teacher Progress Basis — hidden for Admin) */}
+            {!isAdminView && (
+              <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-[#EA7A26]" />
+                    Pet Care Progress
+                  </h4>
+                  <span className="text-xs font-semibold text-[#1E5B3A] tabular-nums">
+                    {selectedStudent.petXp} / {xpRequiredForLevel(selectedStudent.petLevel)} XP
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  {[
+                    { label: 'Hunger', val: selectedStudent.hunger },
+                    { label: 'Happiness', val: selectedStudent.happiness },
+                    { label: 'Energy', val: selectedStudent.energy },
+                    { label: 'Cleanliness', val: selectedStudent.cleanliness },
+                  ].map((stat) => (
+                    <div key={stat.label} className="bg-white rounded-xl p-2.5 border border-[#ECE7D8]">
+                      <div className="flex items-center justify-between font-semibold text-[#172A1E] mb-1">
+                        <span>{stat.label}</span>
+                        <span className="tabular-nums">{stat.val}%</span>
+                      </div>
+                      <div className="w-full h-1.5 rounded-full bg-[#E9E4D4] overflow-hidden">
+                        <div
+                          className="h-full bg-[#1E5B3A] rounded-full"
+                          style={{ width: `${stat.val}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="w-full h-1.5 rounded-full bg-[#E9E4D4] overflow-hidden">
-                      <div
-                        className="h-full bg-[#1E5B3A] rounded-full"
-                        style={{ width: `${stat.val}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Integrity & Focus Status */}
-            <div className="p-4 rounded-2xl border border-[#E5DEC9] space-y-2">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
-                  {selectedStudent.lockedOut ? (
-                    <AlertOctagon className="w-4 h-4 text-red-600" />
-                  ) : (
-                    <ShieldCheck className="w-4 h-4 text-[#1E5B3A]" />
-                  )}
-                  Integrity &amp; Focus Status
-                </h4>
-                <span
-                  className={`text-xs font-bold ${
-                    selectedStudent.lockedOut
-                      ? 'text-red-600'
-                      : selectedStudentAlerts.length > 0
-                        ? 'text-[#EA7A26]'
-                        : 'text-[#1E5B3A]'
-                  }`}
-                >
-                  {selectedStudent.lockedOut
-                    ? `Locked (${selectedStudentAlerts.length} Strikes)`
-                    : `${selectedStudentAlerts.length} Past Strike${
-                        selectedStudentAlerts.length === 1 ? '' : 's'
-                      } · ${selectedStudent.activeGame || 'Lobby'}`}
-                </span>
-              </div>
-              {selectedStudentAlerts.length > 0 && (
-                <div className="text-xs text-[#4D6354] space-y-1 pt-1">
-                  {selectedStudentAlerts.slice(0, 3).map((al) => (
-                    <p key={al.id} className="text-red-700">
-                      • {al.gameTitle}: {al.reason}
-                    </p>
                   ))}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+
+            {/* Integrity & Focus Status (hidden for Admin) */}
+            {!isAdminView && (
+              <div className="p-4 rounded-2xl border border-[#E5DEC9] space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
+                    {selectedStudent.lockedOut ? (
+                      <AlertOctagon className="w-4 h-4 text-red-600" />
+                    ) : (
+                      <ShieldCheck className="w-4 h-4 text-[#1E5B3A]" />
+                    )}
+                    Integrity &amp; Focus Status
+                  </h4>
+                  <span
+                    className={`text-xs font-bold ${
+                      selectedStudent.lockedOut
+                        ? 'text-red-600'
+                        : selectedStudentAlerts.length > 0
+                          ? 'text-[#EA7A26]'
+                          : 'text-[#1E5B3A]'
+                    }`}
+                  >
+                    {selectedStudent.lockedOut
+                      ? `Locked (${selectedStudentAlerts.length} Strikes)`
+                      : `${selectedStudentAlerts.length} Past Strike${
+                          selectedStudentAlerts.length === 1 ? '' : 's'
+                        } · ${selectedStudent.activeGame || 'Lobby'}`}
+                  </span>
+                </div>
+                {selectedStudentAlerts.length > 0 && (
+                  <div className="text-xs text-[#4D6354] space-y-1 pt-1">
+                    {selectedStudentAlerts.slice(0, 3).map((al) => (
+                      <p key={al.id} className="text-red-700">
+                        • {al.gameTitle}: {al.reason}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Recent Quiz Records */}
             <div className="space-y-2.5">

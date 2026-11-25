@@ -133,6 +133,22 @@ service cloud.firestore {
         );
     }
 
+    function isValidSchoolIdPhotoUrl(url) {
+      return url is string
+        && url.size() >= 1
+        && url.size() <= 150000
+        && url.matches('^data:image/(jpeg|png|webp);base64,.*');
+    }
+
+    function isApprovedStudentOrFaculty() {
+      return isTeacher() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) &&
+        'approvalStatus' in get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data &&
+        get(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.approvalStatus == 'approved'
+      );
+    }
+
     // --- Validation Blueprints ---
     function isValidPublicProfile(data) {
       return data.keys().hasAll([
@@ -147,7 +163,8 @@ service cloud.firestore {
         'coins', 'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
         'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore', 'gamesPlayed',
         'correctAnswers', 'totalAnswers', 'isSleeping', 'lockedOut', 'lockReason',
-        'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'createdAt', 'updatedAt'
+        'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'foodInventory',
+        'approvalStatus', 'approvalNote', 'createdAt', 'updatedAt'
       ])
       && isValidId(data.uid)
       && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
@@ -179,6 +196,9 @@ service cloud.firestore {
       && (!('photoUrl' in data) || isValidPhotoUrl(data.photoUrl))
       && (!('isOnline' in data) || data.isOnline is bool)
       && (!('lastSeenAt' in data) || data.lastSeenAt is timestamp)
+      && (!('foodInventory' in data) || (data.foodInventory is map && data.foodInventory.size() <= 16))
+      && (!('approvalStatus' in data) || data.approvalStatus in ['pending', 'approved', 'rejected'])
+      && (!('approvalNote' in data) || (data.approvalNote is string && data.approvalNote.size() <= 140))
       && data.createdAt is timestamp
       && data.updatedAt is timestamp;
     }
@@ -297,6 +317,76 @@ service cloud.firestore {
       && data.updatedAt is timestamp;
     }
 
+    function isValidClassroomSession(data) {
+      return data.keys().hasAll([
+        'id', 'section', 'teacherId', 'teacherName', 'gameId', 'gameTitle',
+        'deckId', 'deckTitle', 'subject', 'status', 'startedAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'section', 'teacherId', 'teacherName', 'gameId', 'gameTitle',
+        'deckId', 'deckTitle', 'subject', 'status', 'startedAt', 'updatedAt'
+      ])
+      && isValidId(data.id)
+      && data.section is string && data.section.size() >= 1 && data.section.size() <= 40
+      && isValidId(data.teacherId)
+      && data.teacherName is string && data.teacherName.size() >= 1 && data.teacherName.size() <= 60
+      && data.gameId in [
+        'lorenscape', 'on_the_run', 'brainzone', 'grab_it', 'catch_the_duck',
+        'word_quest', 'math_dash', 'quiz_master', 'memory_match', 'sorting_squad', 'quick_recall',
+        'four_pics_one_word'
+      ]
+      && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 60
+      && data.deckId is string && data.deckId.size() >= 1 && data.deckId.size() <= 80
+      && data.deckTitle is string && data.deckTitle.size() >= 1 && data.deckTitle.size() <= 100
+      && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 50
+      && data.status in ['active', 'ended']
+      && data.startedAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidSchoolIdVerification(data) {
+      return data.keys().hasAll([
+        'uid', 'studentName', 'email', 'section', 'schoolIdNumber',
+        'idPhotoUrl', 'status', 'reviewedBy', 'reviewNote', 'submittedAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid', 'studentName', 'email', 'section', 'schoolIdNumber',
+        'idPhotoUrl', 'status', 'reviewedBy', 'reviewNote', 'submittedAt', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 60
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+      && data.section is string && data.section.size() <= 40
+      && data.schoolIdNumber is string && data.schoolIdNumber.size() >= 2 && data.schoolIdNumber.size() <= 40
+      && isValidSchoolIdPhotoUrl(data.idPhotoUrl)
+      && data.status in ['pending', 'approved', 'rejected']
+      && data.reviewedBy is string && data.reviewedBy.size() <= 60
+      && data.reviewNote is string && data.reviewNote.size() <= 140
+      && data.submittedAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidSectionChangeRequest(data) {
+      return data.keys().hasAll([
+        'uid', 'studentName', 'currentSection', 'requestedSection', 'reason',
+        'status', 'reviewedBy', 'reviewNote', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid', 'studentName', 'currentSection', 'requestedSection', 'reason',
+        'status', 'reviewedBy', 'reviewNote', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 60
+      && data.currentSection is string && data.currentSection.size() >= 1 && data.currentSection.size() <= 40
+      && data.requestedSection is string && data.requestedSection.size() >= 1 && data.requestedSection.size() <= 40
+      && data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 140
+      && data.status in ['pending', 'approved', 'rejected']
+      && data.reviewedBy is string && data.reviewedBy.size() <= 60
+      && data.reviewNote is string && data.reviewNote.size() <= 140
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
     match /test/connection {
       allow get: if true;
@@ -383,7 +473,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(userId);
       allow list: if isSignedIn() && resource.data.role in ['student', 'teacher', 'admin'];
 
-      // Students can ONLY create student profiles; teacher/admin requires Admin authorization OR verified secret code claim
+      // Students start pending Admin approval; teacher/admin requires Admin authorization OR verified secret code claim
       allow create: if isOwner(userId)
         && isValidId(userId)
         && isValidPublicProfile(incoming())
@@ -393,9 +483,22 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
-          incoming().role == 'student' ||
-          (incoming().role == 'teacher' && isAuthorizedTeacher()) ||
-          (incoming().role == 'admin' && isAdmin())
+          (
+            incoming().role == 'student' &&
+            'approvalStatus' in incoming() &&
+            incoming().approvalStatus == 'pending' &&
+            (!('approvalNote' in incoming()) || incoming().approvalNote == '')
+          ) ||
+          (
+            incoming().role == 'teacher' &&
+            isAuthorizedTeacher() &&
+            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'approved')
+          ) ||
+          (
+            incoming().role == 'admin' &&
+            isAdmin() &&
+            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'approved')
+          )
         );
 
       allow update: if isSignedIn()
@@ -414,12 +517,29 @@ service cloud.firestore {
             isOwner(userId) &&
             incoming().role == existing().role &&
             (existing().lockedOut == false || incoming().lockedOut == true) &&
+            (
+              (!('approvalStatus' in incoming()) && !('approvalStatus' in existing())) ||
+              ('approvalStatus' in incoming() && 'approvalStatus' in existing() && incoming().approvalStatus == existing().approvalStatus) ||
+              ('approvalStatus' in incoming() && incoming().approvalStatus == 'pending' && (!('approvalNote' in incoming()) || incoming().approvalNote == ''))
+            ) &&
+            (
+              !('approvalNote' in incoming()) ||
+              ('approvalNote' in existing() && incoming().approvalNote == existing().approvalNote) ||
+              ('approvalStatus' in incoming() && incoming().approvalStatus == 'pending' && incoming().approvalNote == '')
+            ) &&
+            (
+              existing().role != 'student' ||
+              !('section' in existing()) ||
+              existing().section == '' ||
+              ('section' in incoming() && incoming().section == existing().section)
+            ) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
               'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
-              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
+              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'foodInventory',
+              'approvalStatus', 'approvalNote', 'updatedAt'
             ])
           ) ||
           (
@@ -435,7 +555,8 @@ service cloud.firestore {
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
               'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
-              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'updatedAt'
+              'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'foodInventory',
+              'approvalStatus', 'approvalNote', 'updatedAt'
             ])
           ) ||
           (
@@ -446,6 +567,7 @@ service cloud.firestore {
           (
             incoming().diff(existing()).affectedKeys().hasOnly(['section', 'updatedAt']) &&
             existing().role == 'student' &&
+            (!('section' in existing()) || existing().section == '') &&
             isTeacher()
           ) ||
           (
@@ -473,14 +595,31 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
-      allow update: if isOwner(userId)
+      allow update: if isSignedIn()
         && isValidId(userId)
         && isValidId(docId)
         && isValidPrivateInfo(incoming())
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'section', 'updatedAt']);
+        && (
+          (
+            isOwner(userId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['email', 'section', 'updatedAt']) &&
+            (
+              existing().section == '' ||
+              incoming().section == existing().section ||
+              (
+                exists(/databases/$(database)/documents/publicProfiles/$(userId)) &&
+                get(/databases/$(database)/documents/publicProfiles/$(userId)).data.role != 'student'
+              )
+            )
+          ) ||
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['section', 'updatedAt'])
+          )
+        );
 
       allow delete: if isAdmin() && isValidId(userId) && isValidId(docId);
     }
@@ -522,7 +661,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(recordId);
       allow list: if isSignedIn() && resource.data.score >= 0;
 
-      allow create: if isSignedIn()
+      allow create: if isApprovedStudentOrFaculty()
         && isValidId(recordId)
         && isValidScoreRecord(incoming())
         && incoming().id == recordId
@@ -537,7 +676,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(alertId);
       allow list: if isSignedIn() && (resource.data.studentId == request.auth.uid || resource.data.status in ['locked', 'allowed']);
 
-      allow create: if isSignedIn()
+      allow create: if isApprovedStudentOrFaculty()
         && isValidId(alertId)
         && isValidAntiCheatAlert(incoming())
         && incoming().id == alertId
@@ -565,6 +704,125 @@ service cloud.firestore {
         );
 
       allow delete: if isAdmin() && isValidId(alertId);
+    }
+
+    match /classroomSessions/{sessionId} {
+      allow get: if isSignedIn() && isValidId(sessionId);
+      allow list: if isSignedIn() && resource.data.status in ['active', 'ended'];
+
+      allow create: if isTeacher()
+        && isValidId(sessionId)
+        && isValidClassroomSession(incoming())
+        && incoming().id == sessionId
+        && incoming().teacherId == request.auth.uid
+        && incoming().startedAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isTeacher()
+        && isValidId(sessionId)
+        && isValidClassroomSession(incoming())
+        && incoming().id == existing().id
+        && (incoming().teacherId == request.auth.uid || isAdmin())
+        && incoming().updatedAt == request.time
+        && (incoming().startedAt == request.time || incoming().startedAt == existing().startedAt)
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'section', 'teacherId', 'teacherName', 'gameId', 'gameTitle',
+          'deckId', 'deckTitle', 'subject', 'status', 'startedAt', 'updatedAt'
+        ]);
+
+      allow delete: if isAdmin() && isValidId(sessionId);
+    }
+
+    match /schoolIdVerifications/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() && resource.data.status in ['pending', 'approved', 'rejected'];
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidSchoolIdVerification(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().reviewedBy == ''
+        && incoming().reviewNote == ''
+        && incoming().submittedAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidSchoolIdVerification(incoming())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isOwner(userId) &&
+            existing().status != 'approved' &&
+            (existing().section == '' || incoming().section == existing().section) &&
+            incoming().status == 'pending' &&
+            incoming().reviewedBy == '' &&
+            incoming().reviewNote == '' &&
+            incoming().submittedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'studentName', 'email', 'section', 'schoolIdNumber',
+              'idPhotoUrl', 'status', 'reviewedBy', 'reviewNote', 'submittedAt', 'updatedAt'
+            ])
+          ) ||
+          (
+            isAdmin() &&
+            incoming().submittedAt == existing().submittedAt &&
+            incoming().status in ['pending', 'approved', 'rejected'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'section', 'status', 'reviewedBy', 'reviewNote', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    match /sectionChangeRequests/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() && resource.data.status in ['pending', 'approved', 'rejected'];
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidSectionChangeRequest(incoming())
+        && incoming().uid == request.auth.uid
+        && exists(/databases/$(database)/documents/publicProfiles/$(request.auth.uid))
+        && incoming().requestedSection != incoming().currentSection
+        && incoming().status == 'pending'
+        && incoming().reviewedBy == ''
+        && incoming().reviewNote == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidSectionChangeRequest(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isOwner(userId) &&
+            incoming().requestedSection != incoming().currentSection &&
+            incoming().status == 'pending' &&
+            incoming().reviewedBy == '' &&
+            incoming().reviewNote == '' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'studentName', 'currentSection', 'requestedSection', 'reason',
+              'status', 'reviewedBy', 'reviewNote', 'updatedAt'
+            ])
+          ) ||
+          (
+            isAdmin() &&
+            incoming().status in ['approved', 'rejected'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'requestedSection', 'status', 'reviewedBy', 'reviewNote', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
     }
   }
 }

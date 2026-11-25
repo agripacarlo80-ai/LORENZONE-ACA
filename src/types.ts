@@ -33,12 +33,39 @@ export type GameId =
   | 'quiz_master'
   | 'memory_match'
   | 'sorting_squad'
-  | 'quick_recall';
+  | 'quick_recall'
+  | 'four_pics_one_word';
+
+export type QuestionType =
+  | 'multiple_choice'
+  | 'identification'
+  | 'fill_in_blank'
+  | 'enumeration'
+  | 'four_pics';
+
+export interface CluePanel {
+  label: string;
+  emoji?: string;
+  imageUrl?: string;
+}
+
+export interface GeneratedSlide {
+  slideNumber: number;
+  title: string;
+  subtitle: string;
+  bullets: string[];
+  keyTerm: string;
+  speakerNote: string;
+}
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
 export interface PublicProfile {
   uid: string;
   displayName: string;
   role: UserRole;
+  approvalStatus?: ApprovalStatus;
+  approvalNote?: string;
   petSpecies: PetSpecies;
   petName: string;
   petLevel: number;
@@ -65,6 +92,34 @@ export interface PublicProfile {
   photoUrl?: string;
   isOnline?: boolean;
   lastSeenAt?: unknown;
+  foodInventory?: Record<string, number>;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface SchoolIdVerification {
+  uid: string;
+  studentName: string;
+  email: string;
+  section: string;
+  schoolIdNumber: string;
+  idPhotoUrl: string;
+  status: ApprovalStatus;
+  reviewedBy: string;
+  reviewNote: string;
+  submittedAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface SectionChangeRequest {
+  uid: string;
+  studentName: string;
+  currentSection: string;
+  requestedSection: string;
+  reason: string;
+  status: ApprovalStatus;
+  reviewedBy: string;
+  reviewNote: string;
   createdAt: unknown;
   updatedAt: unknown;
 }
@@ -84,6 +139,9 @@ export interface QuizQuestion {
   options: string[];
   hint: string;
   category?: string;
+  questionType?: QuestionType;
+  enumerationItems?: string[];
+  cluePanels?: CluePanel[];
 }
 
 export interface QuizDeck {
@@ -142,11 +200,37 @@ export interface GameMetadata {
   rewardCoins: number;
 }
 
+export type ShopCategory = 'food' | 'clothes' | 'accessories' | 'furniture';
+
 export interface ShopItem {
   id: string;
   name: string;
-  category: 'clothes' | 'accessories' | 'furniture';
+  category: ShopCategory;
   price: number;
+  requiredLevel: number;
   description: string;
   previewColor: string;
+  hungerBoost?: number;
+  happinessBoost?: number;
+  energyBoost?: number;
+  cleanlinessBoost?: number;
+  xpBoost?: number;
+  isDrink?: boolean;
+  isMedicine?: boolean;
 }
+
+export interface ClassroomSession {
+  id: string;
+  section: string;
+  teacherId: string;
+  teacherName: string;
+  gameId: GameId;
+  gameTitle: string;
+  deckId: string;
+  deckTitle: string;
+  subject: string;
+  status: 'active' | 'ended';
+  startedAt: unknown;
+  updatedAt: unknown;
+}
+

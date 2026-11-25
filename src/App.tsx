@@ -22,23 +22,33 @@ import {
   handleFirestoreError,
   OperationType,
 } from './lib/firebase';
-import { BUILTIN_DECKS } from './data/defaultDecks';
+import { BUILTIN_DECKS, GAMES_CATALOG } from './data/defaultDecks';
+import {
+  applyXpGain,
+  calculateQuizRewards,
+  STARTING_COINS,
+  STARTER_FOOD_INVENTORY,
+} from './lib/progression';
 import {
   AccessCodesConfig,
   AntiCheatAlert,
   AppTab,
   AuthorizedFaculty,
+  ClassroomSession,
   GameId,
   PetSpecies,
   PublicProfile,
   QuizDeck,
+  SchoolIdVerification,
   ScoreRecord,
+  SectionChangeRequest,
   ThemeColor,
   UserRole,
 } from './types';
 import {
   AuthScreen,
   OnboardingStudio,
+  PendingApprovalScreen,
   SplashScreen,
 } from './components/SplashAndAuth';
 import { PetHomeAndCare } from './components/PetHomeAndCare';
@@ -60,6 +70,17 @@ const DEFAULT_ACCESS_CODES = {
   adminCode: 'SLA-ADMIN-2026',
 };
 
+function sectionToSessionId(section: string): string {
+  const clean = section.trim().toLowerCase();
+  const slug = clean.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'class';
+  let hash = 0;
+  for (let i = 0; i < clean.length; i++) {
+    hash = ((hash << 5) - hash + clean.charCodeAt(i)) | 0;
+  }
+  const hashHex = (hash >>> 0).toString(36);
+  return `room_${slug}_${hashHex}`;
+}
+
 function LorenzoneApp() {
   const [showSplash, setShowSplash] = useState(true);
   const [authReady, setAuthReady] = useState(false);
@@ -79,9 +100,29 @@ function LorenzoneApp() {
   const [publishedDecks, setPublishedDecks] = useState<QuizDeck[]>([]);
   const [scoreRecords, setScoreRecords] = useState<ScoreRecord[]>([]);
   const [alerts, setAlerts] = useState<AntiCheatAlert[]>([]);
+  const [classroomSessions, setClassroomSessions] = useState<ClassroomSession[]>([]);
+  const [myIdVerification, setMyIdVerification] = useState<SchoolIdVerification | null>(null);
+  const [myIdVerificationLoaded, setMyIdVerificationLoaded] = useState(false);
+  const [schoolIdVerifications, setSchoolIdVerifications] = useState<SchoolIdVerification[]>([]);
+  const [mySectionRequest, setMySectionRequest] = useState<SectionChangeRequest | null>(null);
+  const [sectionChangeRequests, setSectionChangeRequests] = useState<SectionChangeRequest[]>([]);
+  const [completedClassSessionKeys, setCompletedClassSessionKeys] = useState<string[]>(() => {
+    try {
+      const saved = sessionStorage.getItem('lorenzone_completed_class_sessions');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    return [];
+  });
+  const lastAutoLaunchedSessionKeyRef = useRef<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<AppTab>('home');
   const [launchGameId, setLaunchGameId] = useState<GameId | null>(null);
+  const [launchDeckId, setLaunchDeckId] = useState<string | null>(null);
 
   const [muted, setMuted] = useState(() => soundFx.isMuted());
   const [theme, setTheme] = useState<ThemeColor>(() => {
@@ -119,6 +160,11 @@ function LorenzoneApp() {
         setAuthorizedFaculty([]);
         setOwnDecks([]);
         setPublishedDecks([]);
+        setMyIdVerification(null);
+        setMyIdVerificationLoaded(false);
+        setSchoolIdVerifications([]);
+        setMySectionRequest(null);
+        setSectionChangeRequests([]);
       }
     });
     return () => unsub();
@@ -226,11 +272,64 @@ function LorenzoneApp() {
     };
   }, [user, myProfile]);
 
-  // Attach classroom listeners once user profile is established
-  useEffect(() => {
-    if (!authReady || !user || !myProfile) return;
+  const isUnapprovedStudent = Boolean(
+    myProfile && myProfile.role === 'student' && myProfile.approvalStatus !== 'approved'
+  );
 
-    const isFaculty = myProfile.role === 'teacher' || myProfile.role === 'admin';
+  // Admin lands directly in Admin Control Center (no Pet Home or Quiz Games)
+  useEffect(() => {
+    if (myProfile?.role === 'admin' && (activeTab === 'home' || activeTab === 'games')) {
+      setActiveTab('monitor');
+    }
+  }, [myProfile?.role, activeTab]);
+
+  // Listen to current student's own School ID verification doc when pending/rejected
+  useEffect(() => {
+    if (!authReady || !user || !myProfile || myProfile.role !== 'student') {
+      setMyIdVerification(null);
+      setMyIdVerificationLoaded(false);
+      return;
+    }
+
+    const verifRef = doc(db, 'schoolIdVerifications', user.uid);
+    const unsubVerif = onSnapshot(
+      verifRef,
+      (snap) => {
+        setMyIdVerification(snap.exists() ? (snap.data() as SchoolIdVerification) : null);
+        setMyIdVerificationLoaded(true);
+      },
+      () => {
+        setMyIdVerificationLoaded(true);
+      }
+    );
+
+    return () => unsubVerif();
+  }, [authReady, user, myProfile?.uid, myProfile?.role]);
+
+  // Listen to student's own Grade & Section spelling change request (works both before and after ID approval)
+  useEffect(() => {
+    if (!authReady || !user || !myProfile || myProfile.role !== 'student') {
+      setMySectionRequest(null);
+      return;
+    }
+
+    const reqRef = doc(db, 'sectionChangeRequests', user.uid);
+    const unsubReq = onSnapshot(
+      reqRef,
+      (snap) => {
+        setMySectionRequest(snap.exists() ? (snap.data() as SectionChangeRequest) : null);
+      },
+      () => {}
+    );
+
+    return () => unsubReq();
+  }, [authReady, user, myProfile?.uid, myProfile?.role]);
+
+  // Attach classroom listeners once user profile is established and student is approved
+  useEffect(() => {
+    if (!authReady || !user || !myProfile || isUnapprovedStudent) return;
+
+    const isTeacherUser = myProfile.role === 'teacher';
     const isAdminUser = myProfile.role === 'admin';
 
     const unsubAllProfiles = onSnapshot(
@@ -241,7 +340,7 @@ function LorenzoneApp() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'publicProfiles')
     );
 
-    const unsubDecks = isFaculty
+    const unsubDecks = isTeacherUser
       ? onSnapshot(
           query(collection(db, 'quizDecks'), where('teacherId', '==', user.uid)),
           (snap) => {
@@ -251,13 +350,15 @@ function LorenzoneApp() {
         )
       : () => {};
 
-    const unsubPublishedDecks = onSnapshot(
-      query(collection(db, 'quizDecks'), where('isPublished', '==', true)),
-      (snap) => {
-        setPublishedDecks(snap.docs.map((d) => d.data() as QuizDeck));
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'quizDecks')
-    );
+    const unsubPublishedDecks = !isAdminUser
+      ? onSnapshot(
+          query(collection(db, 'quizDecks'), where('isPublished', '==', true)),
+          (snap) => {
+            setPublishedDecks(snap.docs.map((d) => d.data() as QuizDeck));
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'quizDecks')
+        )
+      : () => {};
 
     const unsubScores = onSnapshot(
       query(collection(db, 'scoreRecords'), where('score', '>=', 0)),
@@ -269,17 +370,22 @@ function LorenzoneApp() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'scoreRecords')
     );
 
-    const unsubAlerts = onSnapshot(
-      isFaculty
-        ? query(collection(db, 'antiCheatAlerts'), where('status', 'in', ['locked', 'allowed']))
-        : query(collection(db, 'antiCheatAlerts'), where('studentId', '==', user.uid)),
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as AntiCheatAlert);
-        list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-        setAlerts(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'antiCheatAlerts')
-    );
+    // Admins do not use Anti-Cheat Detect
+    const unsubAlerts = isAdminUser
+      ? () => {
+          setAlerts([]);
+        }
+      : onSnapshot(
+          isTeacherUser
+            ? query(collection(db, 'antiCheatAlerts'), where('status', 'in', ['locked', 'allowed']))
+            : query(collection(db, 'antiCheatAlerts'), where('studentId', '==', user.uid)),
+          (snap) => {
+            const list = snap.docs.map((d) => d.data() as AntiCheatAlert);
+            list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+            setAlerts(list);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'antiCheatAlerts')
+        );
 
     const unsubFaculty = isAdminUser
       ? onSnapshot(
@@ -307,6 +413,46 @@ function LorenzoneApp() {
         )
       : () => {};
 
+    const unsubVerifications = isAdminUser
+      ? onSnapshot(
+          query(
+            collection(db, 'schoolIdVerifications'),
+            where('status', 'in', ['pending', 'approved', 'rejected'])
+          ),
+          (snap) => {
+            const list = snap.docs.map((d) => d.data() as SchoolIdVerification);
+            list.sort((a, b) => toMillis(b.submittedAt) - toMillis(a.submittedAt));
+            setSchoolIdVerifications(list);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'schoolIdVerifications')
+        )
+      : () => {};
+
+    const unsubSectionRequests = isAdminUser
+      ? onSnapshot(
+          query(
+            collection(db, 'sectionChangeRequests'),
+            where('status', 'in', ['pending', 'approved', 'rejected'])
+          ),
+          (snap) => {
+            const list = snap.docs.map((d) => d.data() as SectionChangeRequest);
+            list.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
+            setSectionChangeRequests(list);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'sectionChangeRequests')
+        )
+      : () => {};
+
+    const unsubClassSessions = !isAdminUser
+      ? onSnapshot(
+          query(collection(db, 'classroomSessions'), where('status', 'in', ['active', 'ended'])),
+          (snap) => {
+            setClassroomSessions(snap.docs.map((d) => d.data() as ClassroomSession));
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'classroomSessions')
+        )
+      : () => {};
+
     return () => {
       unsubAllProfiles();
       unsubDecks();
@@ -315,8 +461,11 @@ function LorenzoneApp() {
       unsubAlerts();
       unsubFaculty();
       unsubAccessCodes();
+      unsubVerifications();
+      unsubSectionRequests();
+      unsubClassSessions();
     };
-  }, [authReady, user, myProfile?.uid, myProfile?.role]);
+  }, [authReady, user, myProfile?.uid, myProfile?.role, isUnapprovedStudent]);
 
   // Real-time online/offline presence heartbeat for Teacher & Admin monitoring
   useEffect(() => {
@@ -365,6 +514,78 @@ function LorenzoneApp() {
       window.removeEventListener('beforeunload', markOffline);
     };
   }, [authReady, user, myProfile?.uid]);
+
+  // Passive pet care decay: only for approved non-admin users who actually use pets
+  const initialDecayDoneRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!authReady || !user || !myProfile?.uid || myProfile.role === 'admin' || isUnapprovedStudent) return;
+    if (initialDecayDoneRef.current === myProfile.uid) return;
+    initialDecayDoneRef.current = myProfile.uid;
+
+    const toMs = (val: unknown): number => {
+      if (!val || typeof val !== 'object') return 0;
+      const maybeTs = val as { toMillis?: () => number; seconds?: number };
+      if (typeof maybeTs.toMillis === 'function') return maybeTs.toMillis();
+      if (typeof maybeTs.seconds === 'number') return maybeTs.seconds * 1000;
+      return 0;
+    };
+
+    const lastMs = toMs(myProfile.lastSeenAt) || toMs(myProfile.updatedAt);
+    if (lastMs > 0) {
+      const elapsedMins = Math.floor((Date.now() - lastMs) / 60_000);
+      if (elapsedMins >= 25) {
+        const steps = Math.min(45, Math.floor(elapsedMins / 20));
+        if (steps > 0) {
+          const nextHunger = Math.max(10, myProfile.hunger - steps * 2);
+          const nextClean = Math.max(10, myProfile.cleanliness - Math.floor(steps * 1.5));
+          const nextJoy = Math.max(12, myProfile.happiness - steps);
+          const nextEnergy = myProfile.isSleeping
+            ? Math.min(100, myProfile.energy + steps * 4)
+            : Math.max(14, myProfile.energy - steps);
+          void updateDoc(doc(db, 'publicProfiles', user.uid), {
+            hunger: nextHunger,
+            cleanliness: nextClean,
+            happiness: nextJoy,
+            energy: nextEnergy,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+        }
+      }
+    }
+  }, [authReady, user, myProfile, isUnapprovedStudent]);
+
+  useEffect(() => {
+    if (!authReady || !user || !myProfile?.uid || myProfile.role === 'admin' || isUnapprovedStudent) return;
+    const decayTimer = window.setInterval(() => {
+      const curr = myProfileRef.current;
+      if (!curr || curr.role === 'admin' || document.visibilityState === 'hidden') return;
+      const nextHunger = Math.max(8, curr.hunger - 2);
+      const nextClean = Math.max(8, curr.cleanliness - 2);
+      const nextJoy = Math.max(10, curr.happiness - 1);
+      const nextEnergy = curr.isSleeping
+        ? Math.min(100, curr.energy + 5)
+        : Math.max(10, curr.energy - 1);
+
+      if (
+        nextHunger === curr.hunger &&
+        nextClean === curr.cleanliness &&
+        nextJoy === curr.happiness &&
+        nextEnergy === curr.energy
+      ) {
+        return;
+      }
+
+      void updateDoc(doc(db, 'publicProfiles', user.uid), {
+        hunger: nextHunger,
+        cleanliness: nextClean,
+        happiness: nextJoy,
+        energy: nextEnergy,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }, 75_000);
+
+    return () => window.clearInterval(decayTimer);
+  }, [authReady, user, myProfile?.uid, myProfile?.role, isUnapprovedStudent]);
 
   const handleGoogleLogin = async () => {
     setAuthLoading(true);
@@ -425,26 +646,31 @@ function LorenzoneApp() {
     outfit: string;
     accessory: string;
     photoUrl: string;
+    schoolIdNumber?: string;
+    schoolIdPhotoUrl?: string;
   }) => {
     if (!user) return;
     const profilePayload: PublicProfile = {
       uid: user.uid,
       displayName: data.displayName,
       role: data.role,
+      approvalStatus: data.role === 'student' ? 'pending' : 'approved',
+      approvalNote: '',
       petSpecies: data.petSpecies,
       petName: data.petName,
       petLevel: 1,
       petXp: 0,
-      coins: 120,
+      coins: STARTING_COINS,
       outfit: data.outfit,
       accessory: data.accessory,
       petColor: data.petColor,
       uniformStyle: data.role === 'teacher' || data.role === 'admin' ? 'faculty_blazer' : 'sla_polo',
       unlockedItems: [data.outfit, data.accessory],
-      hunger: 85,
-      happiness: 90,
-      energy: 90,
-      cleanliness: 95,
+      foodInventory: STARTER_FOOD_INVENTORY,
+      hunger: 75,
+      happiness: 85,
+      energy: 85,
+      cleanliness: 90,
       totalScore: 0,
       gamesPlayed: 0,
       correctAnswers: 0,
@@ -452,7 +678,12 @@ function LorenzoneApp() {
       isSleeping: false,
       lockedOut: false,
       lockReason: '',
-      activeGame: 'Pet Home Room',
+      activeGame:
+        data.role === 'admin'
+          ? 'Admin Control Center'
+          : data.role === 'teacher'
+            ? 'Teacher Room'
+            : 'Pet Home Room',
       section: data.section,
       photoUrl: data.photoUrl || '',
       isOnline: true,
@@ -470,10 +701,205 @@ function LorenzoneApp() {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      if (data.role === 'student' && data.schoolIdNumber && data.schoolIdPhotoUrl) {
+        await setDoc(doc(db, 'schoolIdVerifications', user.uid), {
+          uid: user.uid,
+          studentName: data.displayName,
+          email: user.email || 'student@sanlorenzo.edu',
+          section: data.section,
+          schoolIdNumber: data.schoolIdNumber,
+          idPhotoUrl: data.schoolIdPhotoUrl,
+          status: 'pending',
+          reviewedBy: '',
+          reviewNote: '',
+          submittedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      if (data.role === 'admin') {
+        setActiveTab('monitor');
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `publicProfiles/${user.uid}`);
     }
   };
+
+  const handleSubmitSchoolId = useCallback(
+    async (data: { section: string; schoolIdNumber: string; idPhotoUrl: string }) => {
+      if (!user || !myProfile) return;
+      const verifRef = doc(db, 'schoolIdVerifications', user.uid);
+      const existingSnap = await getDoc(verifRef);
+      const existingProfileSec = (myProfile.section || '').trim().slice(0, 40);
+      const existingVerifSec = existingSnap.exists()
+        ? String((existingSnap.data() as SchoolIdVerification).section || '').trim().slice(0, 40)
+        : '';
+      const lockedSec = existingVerifSec || existingProfileSec || data.section.trim().slice(0, 40);
+
+      const payload = {
+        studentName: myProfile.displayName.slice(0, 60),
+        email: (user.email || 'student@sanlorenzo.edu').slice(0, 120),
+        section: lockedSec,
+        schoolIdNumber: data.schoolIdNumber.slice(0, 40),
+        idPhotoUrl: data.idPhotoUrl,
+        status: 'pending' as const,
+        reviewedBy: '',
+        reviewNote: '',
+        submittedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+
+      try {
+        if (existingSnap.exists()) {
+          await updateDoc(verifRef, payload);
+        } else {
+          await setDoc(verifRef, {
+            uid: user.uid,
+            ...payload,
+          });
+        }
+        await updateDoc(doc(db, 'publicProfiles', user.uid), {
+          ...(!existingProfileSec && lockedSec ? { section: lockedSec } : {}),
+          approvalStatus: 'pending',
+          approvalNote: '',
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `schoolIdVerifications/${user.uid}`);
+      }
+    },
+    [myProfile, user]
+  );
+
+  const handleReviewStudentApproval = useCallback(
+    async (studentUid: string, decision: 'approved' | 'rejected', note: string) => {
+      if (!myProfile || myProfile.role !== 'admin') return;
+      const cleanNote = note.trim().slice(0, 140);
+      try {
+        await updateDoc(doc(db, 'publicProfiles', studentUid), {
+          approvalStatus: decision,
+          approvalNote: cleanNote,
+          updatedAt: serverTimestamp(),
+        });
+        const verifRef = doc(db, 'schoolIdVerifications', studentUid);
+        const verifSnap = await getDoc(verifRef);
+        if (verifSnap.exists()) {
+          await updateDoc(verifRef, {
+            status: decision,
+            reviewedBy: (myProfile.displayName || 'SLA Admin').slice(0, 60),
+            reviewNote: cleanNote,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `publicProfiles/${studentUid}`);
+      }
+    },
+    [myProfile]
+  );
+
+  const handleRequestSectionChange = useCallback(
+    async (requestedSection: string, reason: string) => {
+      if (!user || !myProfile) return;
+      const currentSection = (myProfile.section || '').trim().slice(0, 40) || 'Unassigned';
+      const cleanRequested = requestedSection.trim().slice(0, 40);
+      const cleanReason = (reason.trim() || 'Fix wrong spelling in Grade & Section').slice(0, 140);
+      if (!cleanRequested || cleanRequested === currentSection) {
+        throw new Error(
+          'Please enter a corrected Grade & Section spelling different from your current section.'
+        );
+      }
+      const reqRef = doc(db, 'sectionChangeRequests', user.uid);
+      try {
+        const existingSnap = await getDoc(reqRef);
+        if (existingSnap.exists()) {
+          await updateDoc(reqRef, {
+            studentName: (myProfile.displayName || 'SLA Student').slice(0, 60),
+            currentSection,
+            requestedSection: cleanRequested,
+            reason: cleanReason,
+            status: 'pending',
+            reviewedBy: '',
+            reviewNote: '',
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(reqRef, {
+            uid: user.uid,
+            studentName: (myProfile.displayName || 'SLA Student').slice(0, 60),
+            currentSection,
+            requestedSection: cleanRequested,
+            reason: cleanReason,
+            status: 'pending',
+            reviewedBy: '',
+            reviewNote: '',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `sectionChangeRequests/${user.uid}`);
+      }
+    },
+    [myProfile, user]
+  );
+
+  const handleReviewSectionChange = useCallback(
+    async (
+      studentUid: string,
+      decision: 'approved' | 'rejected',
+      finalSection: string,
+      note: string
+    ) => {
+      if (!myProfile || myProfile.role !== 'admin') return;
+      const cleanFinalSection = finalSection.trim().slice(0, 40);
+      const cleanNote = note.trim().slice(0, 140);
+      const reqRef = doc(db, 'sectionChangeRequests', studentUid);
+      try {
+        const reqSnap = await getDoc(reqRef);
+        const resolvedSection =
+          cleanFinalSection ||
+          (reqSnap.exists()
+            ? String((reqSnap.data() as SectionChangeRequest).requestedSection || '').trim().slice(0, 40)
+            : '');
+
+        if (reqSnap.exists()) {
+          await updateDoc(reqRef, {
+            ...(resolvedSection ? { requestedSection: resolvedSection } : {}),
+            status: decision,
+            reviewedBy: (myProfile.displayName || 'SLA Admin').slice(0, 60),
+            reviewNote: cleanNote,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        if (decision === 'approved' && resolvedSection) {
+          await updateDoc(doc(db, 'publicProfiles', studentUid), {
+            section: resolvedSection,
+            updatedAt: serverTimestamp(),
+          });
+          const privRef = doc(db, 'users', studentUid, 'private', 'info');
+          const privSnap = await getDoc(privRef);
+          if (privSnap.exists()) {
+            await updateDoc(privRef, {
+              section: resolvedSection,
+              updatedAt: serverTimestamp(),
+            });
+          }
+          const verifRef = doc(db, 'schoolIdVerifications', studentUid);
+          const verifSnap = await getDoc(verifRef);
+          if (verifSnap.exists()) {
+            await updateDoc(verifRef, {
+              section: resolvedSection,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `sectionChangeRequests/${studentUid}`);
+      }
+    },
+    [myProfile]
+  );
 
   const handleUpdateProfile = useCallback(
     async (patch: Partial<PublicProfile>) => {
@@ -497,6 +923,7 @@ function LorenzoneApp() {
     async (activity: string) => {
       const current = myProfileRef.current;
       if (!user || !current || current.lockedOut) return;
+      if (current.role === 'student' && current.approvalStatus !== 'approved') return;
       const clean = activity.trim().slice(0, 60) || 'Lobby';
       if (current.activeGame === clean) return;
       try {
@@ -514,7 +941,7 @@ function LorenzoneApp() {
   );
 
   useEffect(() => {
-    if (!myProfile?.uid || myProfile.lockedOut) return;
+    if (!myProfile?.uid || myProfile.lockedOut || isUnapprovedStudent) return;
     if (activeTab === 'home') {
       void reportActivity('Pet Home Room');
     } else if (activeTab === 'games') {
@@ -537,6 +964,7 @@ function LorenzoneApp() {
     myProfile?.role,
     myProfile?.section,
     myProfile?.lockedOut,
+    isUnapprovedStudent,
     reportActivity,
   ]);
 
@@ -609,13 +1037,16 @@ function LorenzoneApp() {
       const safeDuration = Math.min(7200, Math.max(1, Math.round(result.durationSeconds)));
 
       const recordId = `rec_${user.uid}_${Date.now()}`;
-      const earnedCoins = Math.max(15, Math.round(safeScore / 3));
-      let nextXp = myProfile.petXp + Math.max(20, Math.round(safeScore / 2));
-      let nextLevel = myProfile.petLevel;
-      while (nextXp >= nextLevel * 100) {
-        nextXp -= nextLevel * 100;
-        nextLevel += 1;
-      }
+      const { earnedCoins, earnedXp } = calculateQuizRewards({
+        score: safeScore,
+        correctCount: safeCorrect,
+        totalCount: safeTotal,
+      });
+      const { petLevel: nextLevel, petXp: nextXp } = applyXpGain(
+        myProfile.petLevel,
+        myProfile.petXp,
+        earnedXp
+      );
 
       try {
         await setDoc(doc(db, 'scoreRecords', recordId), {
@@ -643,7 +1074,10 @@ function LorenzoneApp() {
           gamesPlayed: Math.min(100000, myProfile.gamesPlayed + 1),
           correctAnswers: Math.min(1000000, myProfile.correctAnswers + safeCorrect),
           totalAnswers: Math.min(1000000, myProfile.totalAnswers + safeTotal),
-          happiness: Math.min(100, myProfile.happiness + 10),
+          happiness: Math.min(100, myProfile.happiness + (safeCorrect > 0 ? 6 : 2)),
+          energy: Math.max(10, myProfile.energy - 7),
+          hunger: Math.max(10, myProfile.hunger - 6),
+          cleanliness: Math.max(10, myProfile.cleanliness - 5),
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
@@ -657,16 +1091,15 @@ function LorenzoneApp() {
     const target = allProfiles.find((p) => p.uid === studentUid);
     if (!target) return;
     const safePoints = Math.max(0, Math.round(points));
-    let nextXp = target.petXp + safePoints;
-    let nextLevel = target.petLevel;
-    while (nextXp >= nextLevel * 100) {
-      nextXp -= nextLevel * 100;
-      nextLevel += 1;
-    }
+    const { petLevel: nextLevel, petXp: nextXp } = applyXpGain(
+      target.petLevel,
+      target.petXp,
+      Math.max(10, Math.round(safePoints / 2))
+    );
     try {
       await updateDoc(doc(db, 'publicProfiles', studentUid), {
         totalScore: Math.min(10000000, target.totalScore + safePoints),
-        coins: Math.min(1000000, target.coins + Math.round(safePoints / 2)),
+        coins: Math.min(1000000, target.coins + Math.max(4, Math.round(safePoints / 5))),
         petXp: Math.min(1000000, nextXp),
         petLevel: Math.min(999, nextLevel),
         updatedAt: serverTimestamp(),
@@ -899,10 +1332,23 @@ function LorenzoneApp() {
         }
       };
 
-      const [scoresSnap, alertsSnap, profilesSnap] = await Promise.all([
+      const [scoresSnap, alertsSnap, profilesSnap, classSessionsSnap, verificationsSnap, sectionReqsSnap] = await Promise.all([
         getDocs(query(collection(db, 'scoreRecords'), where('score', '>=', 0))),
         getDocs(query(collection(db, 'antiCheatAlerts'), where('status', 'in', ['locked', 'allowed']))),
         getDocs(query(collection(db, 'publicProfiles'), where('role', 'in', ['student', 'teacher', 'admin']))),
+        getDocs(query(collection(db, 'classroomSessions'), where('status', 'in', ['active', 'ended']))),
+        getDocs(
+          query(
+            collection(db, 'schoolIdVerifications'),
+            where('status', 'in', ['pending', 'approved', 'rejected'])
+          )
+        ),
+        getDocs(
+          query(
+            collection(db, 'sectionChangeRequests'),
+            where('status', 'in', ['pending', 'approved', 'rejected'])
+          )
+        ),
       ]);
 
       const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
@@ -911,6 +1357,9 @@ function LorenzoneApp() {
         ops.push((batch) => batch.delete(d.ref));
       });
       alertsSnap.docs.forEach((d) => {
+        ops.push((batch) => batch.delete(d.ref));
+      });
+      classSessionsSnap.docs.forEach((d) => {
         ops.push((batch) => batch.delete(d.ref));
       });
 
@@ -930,11 +1379,12 @@ function LorenzoneApp() {
             batch.update(pDoc.ref, {
               petLevel: 1,
               petXp: 0,
-              coins: 120,
-              hunger: 85,
-              happiness: 90,
-              energy: 90,
-              cleanliness: 95,
+              coins: STARTING_COINS,
+              foodInventory: STARTER_FOOD_INVENTORY,
+              hunger: 75,
+              happiness: 85,
+              energy: 85,
+              cleanliness: 90,
               totalScore: 0,
               gamesPlayed: 0,
               correctAnswers: 0,
@@ -942,7 +1392,7 @@ function LorenzoneApp() {
               isSleeping: false,
               lockedOut: false,
               lockReason: '',
-              activeGame: pDoc.id === user.uid ? 'Admin & Secret Codes' : 'Pet Home Room',
+              activeGame: pDoc.id === user.uid ? 'Admin Control Center' : 'Pet Home Room',
               updatedAt: serverTimestamp(),
             })
           );
@@ -957,6 +1407,14 @@ function LorenzoneApp() {
             ops.push((batch) => batch.delete(fDoc.ref));
           });
         }
+
+        verificationsSnap.docs.forEach((vDoc) => {
+          ops.push((batch) => batch.delete(vDoc.ref));
+        });
+
+        sectionReqsSnap.docs.forEach((sDoc) => {
+          ops.push((batch) => batch.delete(sDoc.ref));
+        });
 
         profilesSnap.docs.forEach((pDoc) => {
           if (pDoc.id === user.uid) return;
@@ -975,11 +1433,12 @@ function LorenzoneApp() {
             batch.update(doc(db, 'publicProfiles', user.uid), {
               petLevel: 1,
               petXp: 0,
-              coins: 120,
-              hunger: 85,
-              happiness: 90,
-              energy: 90,
-              cleanliness: 95,
+              coins: STARTING_COINS,
+              foodInventory: STARTER_FOOD_INVENTORY,
+              hunger: 75,
+              happiness: 85,
+              energy: 85,
+              cleanliness: 90,
               totalScore: 0,
               gamesPlayed: 0,
               correctAnswers: 0,
@@ -1024,6 +1483,112 @@ function LorenzoneApp() {
     () => [...customDecks.filter((d) => d.isPublished), ...BUILTIN_DECKS],
     [customDecks]
   );
+
+  const handleStartClassroomSession = useCallback(
+    async (section: string, gameId: GameId, deck: QuizDeck) => {
+      if (!user || !myProfile || (myProfile.role !== 'teacher' && myProfile.role !== 'admin')) return;
+      const cleanSection = section.trim().slice(0, 40);
+      if (!cleanSection) return;
+      const sessionId = sectionToSessionId(cleanSection);
+      const gameMeta = GAMES_CATALOG.find((g) => g.id === gameId);
+      const payload = {
+        id: sessionId,
+        section: cleanSection,
+        teacherId: user.uid,
+        teacherName: (myProfile.displayName || 'SLA Teacher').slice(0, 60),
+        gameId,
+        gameTitle: (gameMeta?.title || gameId).slice(0, 60),
+        deckId: deck.id.slice(0, 80),
+        deckTitle: deck.title.slice(0, 100),
+        subject: deck.subject.slice(0, 50),
+        status: 'active' as const,
+        startedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      try {
+        await setDoc(doc(db, 'classroomSessions', sessionId), payload);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `classroomSessions/${sessionId}`);
+      }
+    },
+    [myProfile, user]
+  );
+
+  const handleEndClassroomSession = useCallback(
+    async (sessionId: string) => {
+      if (!user || !myProfile || (myProfile.role !== 'teacher' && myProfile.role !== 'admin')) return;
+      try {
+        await updateDoc(doc(db, 'classroomSessions', sessionId), {
+          status: 'ended',
+          teacherId: user.uid,
+          teacherName: (myProfile.displayName || 'SLA Teacher').slice(0, 60),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `classroomSessions/${sessionId}`);
+      }
+    },
+    [myProfile, user]
+  );
+
+  const handleCompleteClassroomSession = useCallback((sessionKey: string) => {
+    setLaunchGameId(null);
+    setLaunchDeckId(null);
+    setCompletedClassSessionKeys((prev) => {
+      if (prev.includes(sessionKey)) return prev;
+      const next = [...prev.slice(-24), sessionKey];
+      try {
+        sessionStorage.setItem('lorenzone_completed_class_sessions', JSON.stringify(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
+  const myClassroomSession = useMemo(() => {
+    if (!myProfile || myProfile.role !== 'student') return null;
+    const mySection = (myProfile.section || '').trim();
+    if (!mySection) return null;
+    const matches = classroomSessions.filter(
+      (s) => s.status === 'active' && s.section.trim() === mySection
+    );
+    if (matches.length === 0) return null;
+    matches.sort((a, b) => toMillis(b.startedAt) - toMillis(a.startedAt));
+    return matches[0];
+  }, [classroomSessions, myProfile]);
+
+  const forcedLaunchSession = useMemo(() => {
+    if (!myClassroomSession) return null;
+    const startedMs = toMillis(myClassroomSession.startedAt);
+    if (!startedMs) return null;
+    const sessionKey = `${myClassroomSession.id}_${startedMs}`;
+    if (completedClassSessionKeys.includes(sessionKey)) return null;
+    const deckReady = allDecks.some((d) => d.id === myClassroomSession.deckId);
+    if (!deckReady) return null;
+    return {
+      sessionKey,
+      sessionId: myClassroomSession.id,
+      gameId: myClassroomSession.gameId,
+      deckId: myClassroomSession.deckId,
+      deckTitle: myClassroomSession.deckTitle,
+      subject: myClassroomSession.subject,
+      gameTitle: myClassroomSession.gameTitle,
+      teacherName: myClassroomSession.teacherName,
+      section: myClassroomSession.section,
+    };
+  }, [myClassroomSession, completedClassSessionKeys, allDecks]);
+
+  useEffect(() => {
+    if (!forcedLaunchSession || myProfile?.role !== 'student') return;
+    if (lastAutoLaunchedSessionKeyRef.current === forcedLaunchSession.sessionKey) return;
+    lastAutoLaunchedSessionKeyRef.current = forcedLaunchSession.sessionKey;
+    setLaunchGameId(forcedLaunchSession.gameId);
+    setLaunchDeckId(forcedLaunchSession.deckId);
+    setActiveTab('games');
+    soundFx.playLevelUp();
+  }, [forcedLaunchSession, myProfile?.role]);
+
   const lockedAlerts = useMemo(() => {
     const activeLocked = alerts.filter((a) => a.status === 'locked');
     if (myProfile?.role === 'teacher' && myProfile.section?.trim()) {
@@ -1040,13 +1605,13 @@ function LorenzoneApp() {
   const lockedAlertCount = lockedAlerts.length;
   const prevLockedCountRef = useRef(0);
 
-  // Global audible Teacher/Admin siren across all tabs when a student in view triggers the Cheating Detector
+  // Global audible Teacher siren across all tabs when a student in their classroom triggers the Cheating Detector (disabled for Admin)
   useEffect(() => {
-    const isFaculty = myProfile?.role === 'teacher' || myProfile?.role === 'admin';
-    if (isFaculty && lockedAlertCount > prevLockedCountRef.current) {
+    const isTeacherOnly = myProfile?.role === 'teacher';
+    if (isTeacherOnly && lockedAlertCount > prevLockedCountRef.current) {
       soundFx.playAlertSiren();
     }
-    prevLockedCountRef.current = lockedAlertCount;
+    prevLockedCountRef.current = isTeacherOnly ? lockedAlertCount : 0;
   }, [lockedAlertCount, myProfile?.role]);
 
   const handleToggleMute = () => {
@@ -1107,16 +1672,40 @@ function LorenzoneApp() {
     );
   }
 
+  if (isUnapprovedStudent && myProfile) {
+    return (
+      <PendingApprovalScreen
+        profile={myProfile}
+        email={user.email || ''}
+        verification={myIdVerification}
+        verificationLoaded={myIdVerificationLoaded}
+        sectionRequest={mySectionRequest}
+        onRequestSectionChange={handleRequestSectionChange}
+        onSubmitId={handleSubmitSchoolId}
+        onSignOut={handleFullSignOut}
+      />
+    );
+  }
+
+  const isAdminUser = myProfile.role === 'admin';
+  const pendingApprovalCount = isAdminUser
+    ? allProfiles.filter((p) => p.role === 'student' && p.approvalStatus !== 'approved').length
+    : 0;
+  const pendingSectionReqCount = isAdminUser
+    ? sectionChangeRequests.filter((r) => r.status === 'pending').length
+    : 0;
+  const totalAdminQueueCount = pendingApprovalCount + pendingSectionReqCount;
+
   return (
     <div className="min-h-screen bg-[var(--lz-bg)] flex flex-col">
       {/* 3-Zone Top Bar Contract */}
       <header className="bg-[var(--lz-header-bg)] border-b border-[var(--lz-header-border)] transition-colors">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
           <a
-            href="#home"
+            href={isAdminUser ? '#monitor' : '#home'}
             onClick={(e) => {
               e.preventDefault();
-              setActiveTab('home');
+              setActiveTab(isAdminUser ? 'monitor' : 'home');
             }}
             className="text-xl font-extrabold tracking-tight whitespace-nowrap shrink-0"
             style={{ color: 'var(--lz-header-brand-left)' }}
@@ -1125,35 +1714,56 @@ function LorenzoneApp() {
           </a>
 
           <nav className="flex items-center gap-6 text-sm font-semibold overflow-x-auto">
-            <button
-              type="button"
-              onClick={() => {
-                soundFx.playClick();
-                setActiveTab('home');
-              }}
-              className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
-                activeTab === 'home'
-                  ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
-                  : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
-              }`}
-            >
-              Pet Home
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                soundFx.playClick();
-                setLaunchGameId(null);
-                setActiveTab('games');
-              }}
-              className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
-                activeTab === 'games'
-                  ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
-                  : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
-              }`}
-            >
-              Quiz Games
-            </button>
+            {!isAdminUser && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setActiveTab('home');
+                  }}
+                  className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
+                    activeTab === 'home'
+                      ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
+                      : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
+                  }`}
+                >
+                  Pet Home
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setLaunchGameId(null);
+                    setLaunchDeckId(null);
+                    setActiveTab('games');
+                  }}
+                  className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
+                    activeTab === 'games'
+                      ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
+                      : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
+                  }`}
+                >
+                  Quiz Games
+                </button>
+              </>
+            )}
+            {(myProfile.role === 'teacher' || isAdminUser) && (
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playClick();
+                  setActiveTab('monitor');
+                }}
+                className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
+                  activeTab === 'monitor'
+                    ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
+                    : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
+                }`}
+              >
+                {isAdminUser ? 'Admin Monitor' : 'Teacher Monitor'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1168,36 +1778,34 @@ function LorenzoneApp() {
             >
               Leaderboard
             </button>
-            {(myProfile.role === 'teacher' || myProfile.role === 'admin') && (
+          </nav>
+
+          <div className="shrink-0">
+            {isAdminUser ? (
               <button
                 type="button"
                 onClick={() => {
                   soundFx.playClick();
                   setActiveTab('monitor');
                 }}
-                className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
-                  activeTab === 'monitor'
-                    ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
-                    : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
-                }`}
+                className="px-4 py-2 rounded-xl bg-[var(--lz-header-cta-bg)] hover:bg-[var(--lz-header-cta-hover)] text-white text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
               >
-                {myProfile.role === 'admin' ? 'Admin & Monitor' : 'Teacher Monitor'}
+                {totalAdminQueueCount > 0 ? `Approvals (${totalAdminQueueCount})` : 'Admin Monitor'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playClick();
+                  setLaunchGameId(null);
+                  setLaunchDeckId(null);
+                  setActiveTab('games');
+                }}
+                className="px-4 py-2 rounded-xl bg-[var(--lz-header-cta-bg)] hover:bg-[var(--lz-header-cta-hover)] text-white text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Start Quiz
               </button>
             )}
-          </nav>
-
-          <div className="shrink-0">
-            <button
-              type="button"
-              onClick={() => {
-                soundFx.playClick();
-                setLaunchGameId(null);
-                setActiveTab('games');
-              }}
-              className="px-4 py-2 rounded-xl bg-[var(--lz-header-cta-bg)] hover:bg-[var(--lz-header-cta-hover)] text-white text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Start Quiz
-            </button>
           </div>
         </div>
       </header>
@@ -1214,10 +1822,10 @@ function LorenzoneApp() {
           onChangeTheme={setTheme}
           role={myProfile.role}
           section={myProfile.section}
-          lockedAlertCount={lockedAlertCount}
+          lockedAlertCount={isAdminUser ? 0 : lockedAlertCount}
         />
 
-        {(myProfile.role === 'teacher' || myProfile.role === 'admin') &&
+        {myProfile.role === 'teacher' &&
           lockedAlerts.length > 0 &&
           activeTab !== 'monitor' && (
             <div className="rounded-2xl border-2 border-red-500 bg-red-50 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -1256,7 +1864,33 @@ function LorenzoneApp() {
             </div>
           )}
 
-        {activeTab === 'home' && (
+        {myProfile.role === 'student' && forcedLaunchSession && activeTab !== 'games' && (
+          <div className="rounded-2xl border-2 border-[#EA7A26] bg-[#FFF5ED] px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-xs">
+              <p className="font-extrabold text-[#172A1E]">
+                Live Classroom Quiz in {forcedLaunchSession.section}: {forcedLaunchSession.gameTitle}
+              </p>
+              <p className="text-[#4D6354]">
+                {forcedLaunchSession.subject} · {forcedLaunchSession.deckTitle} · Started by{' '}
+                {forcedLaunchSession.teacherName}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playClick();
+                setLaunchGameId(forcedLaunchSession.gameId);
+                setLaunchDeckId(forcedLaunchSession.deckId);
+                setActiveTab('games');
+              }}
+              className="px-4 py-2 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+            >
+              Go to Classroom Quiz
+            </button>
+          </div>
+        )}
+
+        {activeTab === 'home' && !isAdminUser && (
           <PetHomeAndCare
             profile={myProfile}
             records={scoreRecords}
@@ -1266,13 +1900,23 @@ function LorenzoneApp() {
           />
         )}
 
-        {activeTab === 'games' && (
+        {activeTab === 'games' && !isAdminUser && (
           <MiniGamesHub
             profile={myProfile}
             allProfiles={allProfiles}
             decks={allDecks}
             alerts={alerts}
             initialGameId={launchGameId}
+            initialDeckId={launchDeckId}
+            classroomSessions={classroomSessions}
+            forcedLaunchSession={forcedLaunchSession}
+            onCompleteClassroomSession={handleCompleteClassroomSession}
+            onExitLaunchReset={() => {
+              setLaunchGameId(null);
+              setLaunchDeckId(null);
+            }}
+            onStartClassroomSession={handleStartClassroomSession}
+            onEndClassroomSession={handleEndClassroomSession}
             onTriggerCheatLock={handleTriggerCheatLock}
             onRecordGameResult={handleRecordGameResult}
             onAwardStudent={handleAwardStudent}
@@ -1291,22 +1935,31 @@ function LorenzoneApp() {
           />
         )}
 
-        {activeTab === 'monitor' && (myProfile.role === 'teacher' || myProfile.role === 'admin') && (
+        {activeTab === 'monitor' && (myProfile.role === 'teacher' || isAdminUser) && (
           <TeacherMonitor
             teacherProfile={myProfile}
             allProfiles={allProfiles}
             alerts={alerts}
             records={scoreRecords}
             customDecks={customDecks}
+            publishedDecks={allDecks}
+            classroomSessions={classroomSessions}
             authorizedFaculty={authorizedFaculty}
+            schoolIdVerifications={schoolIdVerifications}
+            onReviewStudentApproval={handleReviewStudentApproval}
+            sectionChangeRequests={sectionChangeRequests}
+            onReviewSectionChange={handleReviewSectionChange}
             onAllowStudent={handleAllowStudent}
             onSaveDeck={handleSaveDeck}
             onUpdateDeck={handleUpdateDeck}
             onDeleteDeck={handleDeleteDeck}
-            onLaunchTeacherGame={(gId) => {
+            onLaunchTeacherGame={(gId, dId) => {
               setLaunchGameId(gId);
+              setLaunchDeckId(dId || null);
               setActiveTab('games');
             }}
+            onStartClassroomSession={handleStartClassroomSession}
+            onEndClassroomSession={handleEndClassroomSession}
             onAddAuthorizedFaculty={handleAddAuthorizedFaculty}
             onRemoveAuthorizedFaculty={handleRemoveAuthorizedFaculty}
             onUpdateUserRole={handleUpdateUserRole}
@@ -1335,6 +1988,8 @@ function LorenzoneApp() {
           theme={theme}
           onChangeTheme={setTheme}
           onUpdateSection={handleUpdateOwnSection}
+          sectionRequest={mySectionRequest}
+          onRequestSectionChange={handleRequestSectionChange}
           onClaimRoleWithCode={handleClaimRoleWithCode}
           onSignOut={async () => {
             await handleFullSignOut();

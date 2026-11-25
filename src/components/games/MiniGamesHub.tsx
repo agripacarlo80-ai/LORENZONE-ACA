@@ -7,13 +7,22 @@ import {
   Lock,
   Maximize2,
   Play,
+  Radio,
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
+  Square,
   Trophy,
 } from 'lucide-react';
-import { GAMES_CATALOG } from '../../data/defaultDecks';
-import { AntiCheatAlert, GameId, PublicProfile, QuizDeck, QuizQuestion } from '../../types';
+import { GAMES_CATALOG, SLA_SECTIONS } from '../../data/defaultDecks';
+import {
+  AntiCheatAlert,
+  ClassroomSession,
+  GameId,
+  PublicProfile,
+  QuizDeck,
+  QuizQuestion,
+} from '../../types';
 import {
   BrainzoneGame,
   CatchTheDuckGame,
@@ -30,8 +39,22 @@ import {
   SortingSquadGame,
   WordQuestGame,
 } from './ClassicMiniGames';
+import { FourPicsOneWordGame } from './FourPicsOneWordGame';
 import { PetAvatar } from '../PetAvatar';
 import { soundFx } from '../../lib/sound';
+import { calculateQuizRewards } from '../../lib/progression';
+
+export interface ForcedClassroomLaunch {
+  sessionKey: string;
+  sessionId: string;
+  gameId: GameId;
+  deckId: string;
+  deckTitle: string;
+  subject: string;
+  gameTitle: string;
+  teacherName: string;
+  section: string;
+}
 
 interface MiniGamesHubProps {
   profile: PublicProfile;
@@ -39,6 +62,13 @@ interface MiniGamesHubProps {
   decks: QuizDeck[];
   alerts: AntiCheatAlert[];
   initialGameId?: GameId | null;
+  initialDeckId?: string | null;
+  classroomSessions?: ClassroomSession[];
+  forcedLaunchSession?: ForcedClassroomLaunch | null;
+  onCompleteClassroomSession?: (sessionKey: string) => void;
+  onExitLaunchReset?: () => void;
+  onStartClassroomSession?: (section: string, gameId: GameId, deck: QuizDeck) => Promise<void>;
+  onEndClassroomSession?: (sessionId: string) => Promise<void>;
   onTriggerCheatLock: (gameId: string, gameTitle: string, subject: string, reason: string) => Promise<void>;
   onRecordGameResult: (
     gameId: GameId,
@@ -65,21 +95,45 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   decks,
   alerts,
   initialGameId = null,
+  initialDeckId = null,
+  classroomSessions = [],
+  forcedLaunchSession = null,
+  onCompleteClassroomSession,
+  onExitLaunchReset,
+  onStartClassroomSession,
+  onEndClassroomSession,
   onTriggerCheatLock,
   onRecordGameResult,
   onAwardStudent,
   onSetActiveGame,
 }) => {
-  const [selectedDeckId, setSelectedDeckId] = useState<string>(decks[0]?.id || '');
-  const [activeGameId, setActiveGameId] = useState<GameId | null>(initialGameId);
+  const isFaculty = profile.role === 'teacher' || profile.role === 'admin';
+  const defaultSection = profile.section?.trim() || SLA_SECTIONS[6];
+
+  const [selectedDeckId, setSelectedDeckId] = useState<string>(() => {
+    if (forcedLaunchSession?.deckId && decks.some((d) => d.id === forcedLaunchSession.deckId)) {
+      return forcedLaunchSession.deckId;
+    }
+    if (initialDeckId && decks.some((d) => d.id === initialDeckId)) {
+      return initialDeckId;
+    }
+    return decks[0]?.id || '';
+  });
+  const [activeGameId, setActiveGameId] = useState<GameId | null>(
+    forcedLaunchSession?.gameId || initialGameId
+  );
   const [gameResult, setGameResult] = useState<GameSessionResult | null>(null);
   const [roundKey, setRoundKey] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const [broadcastToClass, setBroadcastToClass] = useState<boolean>(profile.role === 'teacher');
+  const [broadcastSection, setBroadcastSection] = useState<string>(defaultSection);
 
   const enteredFullscreenRef = useRef(false);
   const startWidthRef = useRef<number>(typeof window !== 'undefined' ? window.innerWidth : 1200);
   const blurTimeoutRef = useRef<number | null>(null);
   const lockTriggeredRef = useRef(false);
+  const appliedForcedKeyRef = useRef<string | null>(null);
 
   const selectedDeck = decks.find((d) => d.id === selectedDeckId) || decks[0];
   const activeGameMeta = GAMES_CATALOG.find((g) => g.id === activeGameId) || null;
@@ -92,6 +146,38 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     }
   }, [decks, selectedDeckId]);
 
+  useEffect(() => {
+    if (initialDeckId && decks.some((d) => d.id === initialDeckId)) {
+      setSelectedDeckId(initialDeckId);
+    }
+  }, [initialDeckId, decks]);
+
+  useEffect(() => {
+    if (profile.section?.trim()) {
+      setBroadcastSection(profile.section.trim());
+    }
+  }, [profile.section]);
+
+  const availableSections = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...SLA_SECTIONS,
+          ...allProfiles.map((p) => (p.section || '').trim()).filter(Boolean),
+        ])
+      ),
+    [allProfiles]
+  );
+
+  const activeTeacherBroadcast = useMemo(() => {
+    if (!isFaculty) return null;
+    return (
+      classroomSessions.find(
+        (s) => s.status === 'active' && s.section.trim() === broadcastSection.trim()
+      ) || null
+    );
+  }, [classroomSessions, isFaculty, broadcastSection]);
+
   // Randomize question order & multiple-choice options each round to deter answer sharing & AI lookup
   const shuffledQuestions: QuizQuestion[] = useMemo(() => {
     if (!selectedDeck) return [];
@@ -103,13 +189,28 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   }, [selectedDeck?.id, selectedDeck?.questions, roundKey]);
 
   useEffect(() => {
-    if (initialGameId) {
+    if (!forcedLaunchSession || profile.role !== 'student') return;
+    if (appliedForcedKeyRef.current === forcedLaunchSession.sessionKey) return;
+    if (!decks.some((d) => d.id === forcedLaunchSession.deckId)) return;
+
+    appliedForcedKeyRef.current = forcedLaunchSession.sessionKey;
+    setSelectedDeckId(forcedLaunchSession.deckId);
+    setGameResult(null);
+    setRoundKey((k) => k + 1);
+    setActiveGameId(forcedLaunchSession.gameId);
+    const meta = GAMES_CATALOG.find((g) => g.id === forcedLaunchSession.gameId);
+    void onSetActiveGame(`Playing: ${meta?.title || forcedLaunchSession.gameId}`);
+  }, [forcedLaunchSession, profile.role, decks, onSetActiveGame]);
+
+  useEffect(() => {
+    if (initialGameId && !forcedLaunchSession) {
+      setGameResult(null);
       setActiveGameId(initialGameId);
       const meta = GAMES_CATALOG.find((g) => g.id === initialGameId);
       const verb = profile.role === 'student' ? 'Playing' : 'Hosting';
       void onSetActiveGame(`${verb}: ${meta?.title || initialGameId}`);
     }
-  }, [initialGameId, onSetActiveGame, profile.role]);
+  }, [initialGameId, forcedLaunchSession, onSetActiveGame, profile.role]);
 
   // Reset current round progress whenever student gets locked out so they cannot resume after consulting AI
   useEffect(() => {
@@ -286,6 +387,10 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     setActiveGameId(gameId);
     enterExamFullscreen();
     void onSetActiveGame(`${verb}: ${meta?.title || gameId}`);
+
+    if (isFaculty && broadcastToClass && broadcastSection.trim() && onStartClassroomSession) {
+      void onStartClassroomSession(broadcastSection.trim(), gameId, selectedDeck);
+    }
   };
 
   const exitGame = () => {
@@ -297,6 +402,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     setIsFullscreen(false);
     setActiveGameId(null);
     setGameResult(null);
+    onExitLaunchReset?.();
     void onSetActiveGame('Browsing Quiz Games');
   };
 
@@ -309,6 +415,13 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     setIsFullscreen(false);
     soundFx.playLevelUp();
     setGameResult(result);
+    if (
+      forcedLaunchSession &&
+      forcedLaunchSession.gameId === activeGameMeta.id &&
+      forcedLaunchSession.deckId === selectedDeck.id
+    ) {
+      onCompleteClassroomSession?.(forcedLaunchSession.sessionKey);
+    }
     await onRecordGameResult(activeGameMeta.id, activeGameMeta.title, selectedDeck, result);
     void onSetActiveGame('Browsing Quiz Games');
   };
@@ -360,14 +473,40 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
               <ArrowLeft className="w-4 h-4" />
             </button>
             <div>
-              <h2 className="text-base font-bold text-[#172A1E]">{activeGameMeta.title}</h2>
+              <h2 className="text-base font-bold text-[#172A1E] flex items-center gap-2">
+                {activeGameMeta.title}
+                {profile.role === 'student' &&
+                  forcedLaunchSession &&
+                  forcedLaunchSession.gameId === activeGameMeta.id && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#EA7A26]/15 text-[#C65B10] text-[11px] font-bold">
+                      <Radio className="w-3 h-3" />
+                      {forcedLaunchSession.section} Live Quiz
+                    </span>
+                  )}
+              </h2>
               <p className="text-xs text-[#4D6354]">
                 {selectedDeck.subject} · {selectedDeck.title}
+                {profile.role === 'student' &&
+                  forcedLaunchSession &&
+                  ` · Teacher: ${forcedLaunchSession.teacherName}`}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap">
+            {isFaculty && activeTeacherBroadcast && onEndClassroomSession && (
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playClick();
+                  void onEndClassroomSession(activeTeacherBroadcast.id);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                End Live Quiz ({activeTeacherBroadcast.section})
+              </button>
+            )}
             {profile.role === 'student' && !gameResult && (
               <>
                 <span className="text-xs font-semibold text-[#1E5B3A] flex items-center gap-1.5">
@@ -439,7 +578,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-3 gap-3 bg-[#FAF8F2] p-4 rounded-2xl border border-[#E5DEC9] tabular-nums">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#FAF8F2] p-4 rounded-2xl border border-[#E5DEC9] tabular-nums">
                 <div>
                   <p className="text-xs text-[#4D6354]">Score</p>
                   <p className="text-xl font-extrabold text-[#1E5B3A]">+{gameResult.score}</p>
@@ -451,9 +590,30 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-[#4D6354]">Coins</p>
+                  <p className="text-xs text-[#4D6354]">Coins Earned</p>
                   <p className="text-xl font-extrabold text-[#EA7A26] flex items-center justify-center gap-1">
-                    <Coins className="w-4 h-4" />+{Math.max(15, Math.round(gameResult.score / 3))}
+                    <Coins className="w-4 h-4" />+
+                    {
+                      calculateQuizRewards({
+                        score: gameResult.score,
+                        correctCount: gameResult.correctCount,
+                        totalCount: gameResult.totalCount,
+                      }).earnedCoins
+                    }
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-[#4D6354]">Pet XP</p>
+                  <p className="text-xl font-extrabold text-[#1E5B3A]">
+                    +
+                    {
+                      calculateQuizRewards({
+                        score: gameResult.score,
+                        correctCount: gameResult.correctCount,
+                        totalCount: gameResult.totalCount,
+                      }).earnedXp
+                    }{' '}
+                    XP
                   </p>
                 </div>
               </div>
@@ -561,6 +721,13 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                   onComplete={(res) => void handleCompleteGame(res)}
                 />
               )}
+              {activeGameId === 'four_pics_one_word' && (
+                <FourPicsOneWordGame
+                  questions={shuffledQuestions}
+                  profile={profile}
+                  onComplete={(res) => void handleCompleteGame(res)}
+                />
+              )}
             </div>
           )}
         </div>
@@ -571,38 +738,92 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   // Mini-Games Catalog + Subject Selector
   return (
     <div className="space-y-6">
-      <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-        <div>
-          <p className="text-xs font-semibold text-[#EA7A26]">Customizable Quiz Arena</p>
-          <h2 className="text-2xl font-bold text-[#172A1E] flex items-center gap-2 mt-0.5">
-            <Gamepad2 className="w-6 h-6 text-[#1E5B3A]" />
-            11 Interactive Mini-Games
-          </h2>
-          <p className="text-xs text-[#4D6354] mt-1">
-            Select any subject deck below — including custom &amp; PowerPoint-imported teacher quizzes — then launch a game.
-          </p>
-        </div>
+      <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+          <div>
+            <p className="text-xs font-semibold text-[#EA7A26]">Customizable Quiz Arena</p>
+            <h2 className="text-2xl font-bold text-[#172A1E] flex items-center gap-2 mt-0.5">
+              <Gamepad2 className="w-6 h-6 text-[#1E5B3A]" />
+              12 Interactive Mini-Games
+            </h2>
+            <p className="text-xs text-[#4D6354] mt-1">
+              Select any subject deck below — including custom &amp; PowerPoint-imported teacher quizzes — then launch a game.
+            </p>
+          </div>
 
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-          <div className="flex items-center gap-2 bg-[#FAF8F2] border border-[#D8D0BC] rounded-xl px-3.5 py-2">
-            <BookOpen className="w-4 h-4 text-[#1E5B3A] shrink-0" />
-            <select
-              value={selectedDeck?.id || ''}
-              onChange={(e) => {
-                soundFx.playClick();
-                setSelectedDeckId(e.target.value);
-              }}
-              aria-label="Select Subject Quiz Deck"
-              className="text-xs font-semibold text-[#172A1E] bg-transparent focus:outline-none cursor-pointer"
-            >
-              {decks.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.subject}: {d.title} ({d.questions.length} Qs)
-                </option>
-              ))}
-            </select>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <div className="flex items-center gap-2 bg-[#FAF8F2] border border-[#D8D0BC] rounded-xl px-3.5 py-2">
+              <BookOpen className="w-4 h-4 text-[#1E5B3A] shrink-0" />
+              <select
+                value={selectedDeck?.id || ''}
+                onChange={(e) => {
+                  soundFx.playClick();
+                  setSelectedDeckId(e.target.value);
+                }}
+                aria-label="Select Subject Quiz Deck"
+                className="text-xs font-semibold text-[#172A1E] bg-transparent focus:outline-none cursor-pointer"
+              >
+                {decks.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.subject}: {d.title} ({d.questions.length} Qs)
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
+
+        {isFaculty && onStartClassroomSession && (
+          <div className="pt-4 border-t border-[#ECE7D8] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-xs font-bold text-[#172A1E] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={broadcastToClass}
+                  onChange={(e) => setBroadcastToClass(e.target.checked)}
+                  className="rounded border-[#D8D0BC]"
+                />
+                <Radio className="w-3.5 h-3.5 text-[#EA7A26]" />
+                Send students directly into the game I start for classroom:
+              </label>
+
+              {profile.role === 'admin' ? (
+                <select
+                  value={broadcastSection}
+                  onChange={(e) => setBroadcastSection(e.target.value)}
+                  aria-label="Target classroom section"
+                  className="px-3 py-1.5 rounded-xl border border-[#D8D0BC] bg-[#FAF8F2] text-xs font-semibold text-[#172A1E]"
+                >
+                  {availableSections.map((sec) => (
+                    <option key={sec} value={sec}>
+                      {sec}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-bold text-[#1E5B3A]">
+                  {broadcastSection}
+                </span>
+              )}
+            </div>
+
+            {activeTeacherBroadcast && onEndClassroomSession && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-[#1E5B3A]">
+                  Live: {activeTeacherBroadcast.gameTitle} ({activeTeacherBroadcast.subject})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void onEndClassroomSession(activeTeacherBroadcast.id)}
+                  className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Square className="w-3 h-3 fill-current" />
+                  End Live Quiz
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {(!selectedDeck || selectedDeck.questions.length === 0) && (
@@ -611,7 +832,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
         </div>
       )}
 
-      {/* 11 Games Grid */}
+      {/* 12 Games Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {GAMES_CATALOG.map((game) => {
           const canPlay = Boolean(selectedDeck && selectedDeck.questions.length > 0);

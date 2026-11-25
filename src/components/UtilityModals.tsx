@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { BookOpen, HelpCircle, Settings, ShieldCheck, Volume2, VolumeX, X, LogOut, KeyRound, CheckCircle2, Palette, School } from 'lucide-react';
+import { BookOpen, HelpCircle, Settings, ShieldCheck, Volume2, VolumeX, X, LogOut, KeyRound, CheckCircle2, Palette, School, Lock } from 'lucide-react';
 import { SLA_SECTIONS } from '../data/defaultDecks';
-import { PublicProfile, ThemeColor, UserRole } from '../types';
+import { PublicProfile, SectionChangeRequest, ThemeColor, UserRole } from '../types';
 import { soundFx } from '../lib/sound';
 
 const THEME_OPTIONS: Array<{
@@ -85,17 +85,19 @@ export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
           Instructions
         </button>
 
-        <button
-          type="button"
-          onClick={() => {
-            soundFx.playClick();
-            onOpenQuestionsHelp();
-          }}
-          className="px-3 py-1.5 rounded-xl border border-[var(--lz-border)] hover:bg-[var(--lz-surface-alt)] text-xs font-semibold text-[#172A1E] flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <HelpCircle className="w-3.5 h-3.5 text-[#EA7A26]" />
-          Game Rules
-        </button>
+        {role !== 'admin' && (
+          <button
+            type="button"
+            onClick={() => {
+              soundFx.playClick();
+              onOpenQuestionsHelp();
+            }}
+            className="px-3 py-1.5 rounded-xl border border-[var(--lz-border)] hover:bg-[var(--lz-surface-alt)] text-xs font-semibold text-[#172A1E] flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <HelpCircle className="w-3.5 h-3.5 text-[#EA7A26]" />
+            Game Rules
+          </button>
+        )}
 
         <button
           type="button"
@@ -150,7 +152,7 @@ export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
             <span className="font-semibold text-[#EA7A26]">{section}</span>
           </>
         )}
-        {(role === 'teacher' || role === 'admin') && lockedAlertCount > 0 && (
+        {role === 'teacher' && lockedAlertCount > 0 && (
           <>
             <span aria-hidden="true">·</span>
             <span className="font-bold text-red-600 tabular-nums">{lockedAlertCount} Focus Alert</span>
@@ -237,6 +239,8 @@ export const SettingsModal: React.FC<{
   theme: ThemeColor;
   onChangeTheme: (next: ThemeColor) => void;
   onUpdateSection: (nextSection: string) => Promise<void>;
+  sectionRequest?: SectionChangeRequest | null;
+  onRequestSectionChange?: (requestedSection: string, reason: string) => Promise<void>;
   onClaimRoleWithCode: (targetRole: 'teacher' | 'admin', accessCode: string) => Promise<void>;
   onSignOut: () => Promise<void>;
   onClose: () => void;
@@ -248,15 +252,26 @@ export const SettingsModal: React.FC<{
   theme,
   onChangeTheme,
   onUpdateSection,
+  sectionRequest = null,
+  onRequestSectionChange,
   onClaimRoleWithCode,
   onSignOut,
   onClose,
 }) => {
-  const initialSec = profile.section?.trim() || SLA_SECTIONS[6];
+  const currentStudentSec = (profile.section || '').trim();
+  const initialSec = currentStudentSec || SLA_SECTIONS[6];
   const [sectionInput, setSectionInput] = useState(initialSec);
   const [useCustomSection, setUseCustomSection] = useState(!SLA_SECTIONS.includes(initialSec));
   const [savingSection, setSavingSection] = useState(false);
   const [sectionFeedback, setSectionFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  const [spellingInput, setSpellingInput] = useState(sectionRequest?.requestedSection || initialSec);
+  const [useCustomSpelling, setUseCustomSpelling] = useState(
+    !SLA_SECTIONS.includes(sectionRequest?.requestedSection || initialSec)
+  );
+  const [spellingReason, setSpellingReason] = useState('');
+  const [submittingSpelling, setSubmittingSpelling] = useState(false);
+  const [spellingFeedback, setSpellingFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   const [secretCode, setSecretCode] = useState('');
   const [verifying, setVerifying] = useState(false);
@@ -276,10 +291,7 @@ export const SettingsModal: React.FC<{
       soundFx.playCorrect();
       setSectionFeedback({
         type: 'ok',
-        text:
-          profile.role === 'teacher'
-            ? `Teaching classroom set to "${cleaned}".`
-            : `Class section updated to "${cleaned}".`,
+        text: `Teaching classroom set to "${cleaned}".`,
       });
     } catch (err) {
       soundFx.playWrong();
@@ -289,6 +301,45 @@ export const SettingsModal: React.FC<{
       });
     } finally {
       setSavingSection(false);
+    }
+  };
+
+  const handleSubmitSpellingCorrection = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onRequestSectionChange) return;
+    const cleaned = spellingInput.trim().slice(0, 40);
+    if (!cleaned) {
+      setSpellingFeedback({ type: 'err', text: 'Please enter the corrected Grade & Section spelling.' });
+      return;
+    }
+    if (cleaned === currentStudentSec) {
+      setSpellingFeedback({
+        type: 'err',
+        text: 'Please enter a corrected spelling different from your current section.',
+      });
+      return;
+    }
+    setSubmittingSpelling(true);
+    setSpellingFeedback(null);
+    try {
+      await onRequestSectionChange(
+        cleaned,
+        spellingReason.trim() || 'Fix wrong spelling in my Grade & Section'
+      );
+      soundFx.playCorrect();
+      setSpellingReason('');
+      setSpellingFeedback({
+        type: 'ok',
+        text: `Spelling correction request to "${cleaned}" sent to the SLA Admin for approval.`,
+      });
+    } catch (err) {
+      soundFx.playWrong();
+      setSpellingFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to submit section spelling request.',
+      });
+    } finally {
+      setSubmittingSpelling(false);
     }
   };
 
@@ -325,23 +376,22 @@ export const SettingsModal: React.FC<{
         <div className="p-4 rounded-2xl bg-[var(--lz-surface-alt)] border border-[var(--lz-border)] space-y-1">
           <p className="font-bold text-[#172A1E]">{profile.displayName}</p>
           <p className="text-xs text-[#4D6354] capitalize">
-            Role: {profile.role} · Section: {profile.section || 'Unassigned'} · Pet: {profile.petName}
+            Role: {profile.role} · Section: {profile.section || 'Unassigned'}
+            {profile.role !== 'admin' ? ` · Pet: ${profile.petName}` : ''}
           </p>
           <p className="text-xs text-[#4D6354]">Private Gmail: {email}</p>
         </div>
 
-        {(profile.role === 'student' || profile.role === 'teacher') && (
+        {profile.role === 'teacher' && (
           <form onSubmit={handleSaveSection} className="p-4 rounded-2xl border border-[var(--lz-border)] space-y-3">
             <div className="flex items-center gap-2">
               <School className="w-4 h-4 text-[#1E5B3A]" />
               <div>
                 <p className="font-semibold text-[#172A1E] text-xs">
-                  {profile.role === 'teacher' ? 'Assigned Teaching Classroom' : 'Enrolled Grade & Section'}
+                  Assigned Teaching Classroom
                 </p>
                 <p className="text-xs text-[#4D6354]">
-                  {profile.role === 'teacher'
-                    ? 'Choose the section you teach to monitor its students inside your individual classroom room.'
-                    : 'Choose your section so your teacher can monitor your classroom progress.'}
+                  Choose the section you teach to monitor its students inside your individual classroom room.
                 </p>
               </div>
             </div>
@@ -398,6 +448,125 @@ export const SettingsModal: React.FC<{
               </button>
             </div>
           </form>
+        )}
+
+        {profile.role === 'student' && (
+          <div className="p-4 rounded-2xl border border-[var(--lz-border)] space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <Lock className="w-4 h-4 text-[#EA7A26] shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-[#172A1E] text-xs">
+                    Permanent Grade &amp; Section
+                  </p>
+                  <p className="text-xs text-[#4D6354]">
+                    Your section is locked after sign-in. Only an SLA Admin can approve fixing a wrong spelling.
+                  </p>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-[#FAF8F2] border border-[#E5DEC9] text-xs font-bold text-[#172A1E] shrink-0">
+                {currentStudentSec || 'Unassigned'}
+              </span>
+            </div>
+
+            {sectionRequest && (
+              <div
+                className={`p-3 rounded-xl border text-xs space-y-0.5 ${
+                  sectionRequest.status === 'pending'
+                    ? 'bg-amber-50 border-amber-200 text-amber-900'
+                    : sectionRequest.status === 'approved'
+                      ? 'bg-emerald-50 border-emerald-200 text-[#1E5B3A]'
+                      : 'bg-red-50 border-red-200 text-red-700'
+                }`}
+              >
+                <p className="font-bold">
+                  {sectionRequest.status === 'pending'
+                    ? 'Spelling Correction Pending Admin Approval'
+                    : sectionRequest.status === 'approved'
+                      ? 'Last Spelling Correction Approved'
+                      : 'Spelling Correction Request Declined'}
+                </p>
+                <p>
+                  Requested spelling: <strong>{sectionRequest.requestedSection}</strong>
+                  {sectionRequest.reviewNote ? ` · Note: ${sectionRequest.reviewNote}` : ''}
+                </p>
+              </div>
+            )}
+
+            {onRequestSectionChange && (
+              <form onSubmit={handleSubmitSpellingCorrection} className="pt-2 border-t border-[#ECE7D8] space-y-2.5">
+                <p className="text-xs font-semibold text-[#172A1E]">
+                  Made a spelling mistake? Request Admin Spelling Correction
+                </p>
+                <select
+                  value={
+                    useCustomSpelling
+                      ? '__custom__'
+                      : SLA_SECTIONS.includes(spellingInput)
+                        ? spellingInput
+                        : '__custom__'
+                  }
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSpellingFeedback(null);
+                    if (val === '__custom__') {
+                      setUseCustomSpelling(true);
+                      if (SLA_SECTIONS.includes(spellingInput)) setSpellingInput('');
+                    } else {
+                      setUseCustomSpelling(false);
+                      setSpellingInput(val);
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs font-medium focus:outline-none focus:border-[#1E5B3A]"
+                >
+                  {SLA_SECTIONS.map((sec) => (
+                    <option key={sec} value={sec}>
+                      {sec}
+                    </option>
+                  ))}
+                  <option value="__custom__">Type Exact Corrected Spelling...</option>
+                </select>
+                {(useCustomSpelling || !SLA_SECTIONS.includes(spellingInput)) && (
+                  <input
+                    type="text"
+                    maxLength={40}
+                    value={spellingInput}
+                    onChange={(e) => setSpellingInput(e.target.value)}
+                    placeholder="Enter exact corrected Grade & Section..."
+                    className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs focus:outline-none focus:border-[#1E5B3A]"
+                  />
+                )}
+                <input
+                  type="text"
+                  maxLength={140}
+                  value={spellingReason}
+                  onChange={(e) => setSpellingReason(e.target.value)}
+                  placeholder="Spelling mistake note (e.g., typo in St. Lorenzo)"
+                  className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-xs focus:outline-none focus:border-[#1E5B3A]"
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    {spellingFeedback && (
+                      <p
+                        className={`text-xs font-semibold ${
+                          spellingFeedback.type === 'ok' ? 'text-[#1E5B3A]' : 'text-red-700'
+                        }`}
+                      >
+                        {spellingFeedback.text}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={submittingSpelling}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                  >
+                    {submittingSpelling ? 'Sending...' : 'Request Spelling Fix'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
         )}
 
         <div className="p-4 rounded-2xl border border-[var(--lz-border)] space-y-3">

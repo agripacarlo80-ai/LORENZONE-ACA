@@ -3,39 +3,64 @@ import {
   Activity,
   AlertOctagon,
   BookOpen,
+  Check,
   CheckCircle2,
   Clock,
+  Copy,
   Download,
   Edit3,
   Eye,
   EyeOff,
   FileUp,
   GraduationCap,
+  IdCard,
+  ImagePlus,
+  KeyRound,
+  Loader2,
+  Lock,
+  Play,
   Plus,
+  Presentation,
+  Radio,
+  RotateCcw,
+  School,
+  Search,
   ShieldCheck,
+  Sparkles,
+  Square,
   Trash2,
   UploadCloud,
   UserPlus,
   Users,
   Volume2,
-  Play,
-  KeyRound,
-  Copy,
-  School,
-  RotateCcw,
+  Wand2,
+  X,
+  XCircle,
 } from 'lucide-react';
 import {
   AntiCheatAlert,
+  ApprovalStatus,
   AuthorizedFaculty,
+  ClassroomSession,
+  CluePanel,
   GameId,
+  GeneratedSlide,
   PublicProfile,
+  QuestionType,
   QuizDeck,
   QuizQuestion,
+  SchoolIdVerification,
   ScoreRecord,
+  SectionChangeRequest,
 } from '../types';
-import { SLA_SECTIONS } from '../data/defaultDecks';
+import { STARTING_COINS } from '../lib/progression';
+import { GAMES_CATALOG, SLA_SECTIONS } from '../data/defaultDecks';
+import { auth } from '../lib/firebase';
+import { compressCluePhoto } from '../lib/imageUpload';
+import { downloadGeneratedPptx } from '../lib/pptxGenerator';
 import { downloadLeaderboardCsv, parsePlainTextSlides, parsePptxFile } from '../lib/pptxParser';
 import { formatLastSeen, getStudentPresence, timestampToMillis } from '../lib/presence';
+import { QUESTION_TYPE_LABELS, sanitizeQuestionForFirestore } from '../lib/questionUtils';
 import { soundFx } from '../lib/sound';
 import { PetAvatar } from './PetAvatar';
 
@@ -45,7 +70,22 @@ interface TeacherMonitorProps {
   alerts: AntiCheatAlert[];
   records: ScoreRecord[];
   customDecks: QuizDeck[];
+  publishedDecks: QuizDeck[];
+  classroomSessions: ClassroomSession[];
   authorizedFaculty: AuthorizedFaculty[];
+  schoolIdVerifications?: SchoolIdVerification[];
+  onReviewStudentApproval?: (
+    studentUid: string,
+    decision: 'approved' | 'rejected',
+    note: string
+  ) => Promise<void>;
+  sectionChangeRequests?: SectionChangeRequest[];
+  onReviewSectionChange?: (
+    studentUid: string,
+    decision: 'approved' | 'rejected',
+    finalSection: string,
+    note: string
+  ) => Promise<void>;
   onAllowStudent: (alert: AntiCheatAlert) => Promise<void>;
   onSaveDeck: (deck: Omit<QuizDeck, 'createdAt' | 'updatedAt'>) => Promise<void>;
   onUpdateDeck: (
@@ -53,7 +93,9 @@ interface TeacherMonitorProps {
     patch: Pick<QuizDeck, 'title' | 'subject' | 'description' | 'sourceType' | 'questions' | 'isPublished'>
   ) => Promise<void>;
   onDeleteDeck: (deckId: string) => Promise<void>;
-  onLaunchTeacherGame: (gameId: GameId) => void;
+  onLaunchTeacherGame: (gameId: GameId, deckId?: string) => void;
+  onStartClassroomSession: (section: string, gameId: GameId, deck: QuizDeck) => Promise<void>;
+  onEndClassroomSession: (sessionId: string) => Promise<void>;
   onAddAuthorizedFaculty: (email: string, fullName: string, role: 'teacher') => Promise<void>;
   onRemoveAuthorizedFaculty: (email: string) => Promise<void>;
   onUpdateUserRole: (uid: string, nextRole: 'student' | 'teacher') => Promise<void>;
@@ -77,8 +119,19 @@ interface TeacherMonitorProps {
 
 type MonitorTab = 'live' | 'builder' | 'pptx' | 'admin';
 
-function getActivityBadge(profile: PublicProfile, isOnline: boolean) {
-  if (profile.lockedOut) {
+function getInitials(name: string): string {
+  return (
+    name
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() || '')
+      .join('') || 'SL'
+  );
+}
+
+function getActivityBadge(profile: PublicProfile, isOnline: boolean, ignoreLock = false) {
+  if (profile.lockedOut && !ignoreLock) {
     return {
       label: `Locked: ${profile.activeGame || 'Quiz'}`,
       className: 'bg-red-50 text-red-700 border-red-200',
@@ -90,7 +143,7 @@ function getActivityBadge(profile: PublicProfile, isOnline: boolean) {
       className: 'bg-stone-100 text-[#4D6354] border-[#E5DEC9]',
     };
   }
-  const activity = (profile.activeGame || 'Lobby').trim();
+  const activity = (profile.activeGame || 'Lobby').replace(/\s*\(Locked\)$/i, '').trim() || 'Lobby';
   if (/^(Playing|Hosting):/i.test(activity)) {
     return {
       label: activity,
@@ -115,12 +168,20 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   alerts,
   records,
   customDecks,
+  publishedDecks,
+  classroomSessions,
   authorizedFaculty,
+  schoolIdVerifications = [],
+  onReviewStudentApproval,
+  sectionChangeRequests = [],
+  onReviewSectionChange,
   onAllowStudent,
   onSaveDeck,
   onUpdateDeck,
   onDeleteDeck,
   onLaunchTeacherGame,
+  onStartClassroomSession,
+  onEndClassroomSession,
   onAddAuthorizedFaculty,
   onRemoveAuthorizedFaculty,
   onUpdateUserRole,
@@ -143,6 +204,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [questions, setQuestions] = useState<QuizQuestion[]>([
     {
       id: `q_${Date.now()}`,
+      questionType: 'multiple_choice',
       prompt: '',
       answer: '',
       options: ['', '', '', ''],
@@ -153,9 +215,35 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [savingDeck, setSavingDeck] = useState(false);
   const [builderFeedback, setBuilderFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  // PPTX Importer state
+  // PPTX Importer & AI PPTX Generator state
   const [pptxStatus, setPptxStatus] = useState<string | null>(null);
   const [pptxTextFallback, setPptxTextFallback] = useState('');
+  const [aiTopic, setAiTopic] = useState('');
+  const [aiSubject, setAiSubject] = useState('Science');
+  const [aiGradeLevel, setAiGradeLevel] = useState('Grade 8');
+  const [aiSlideCount, setAiSlideCount] = useState(6);
+  const [aiQuestionCount, setAiQuestionCount] = useState(6);
+  const [aiNotes, setAiNotes] = useState('');
+  const [aiQuestionMix, setAiQuestionMix] = useState<QuestionType[]>([
+    'identification',
+    'fill_in_blank',
+    'enumeration',
+    'four_pics',
+    'multiple_choice',
+  ]);
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiDownloadingPptx, setAiDownloadingPptx] = useState(false);
+  const [aiPublishing, setAiPublishing] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiPublishMsg, setAiPublishMsg] = useState<string | null>(null);
+  const [aiGeneratedResult, setAiGeneratedResult] = useState<{
+    deckTitle: string;
+    subject: string;
+    gradeLevel: string;
+    description: string;
+    slides: GeneratedSlide[];
+    questions: QuizQuestion[];
+  } | null>(null);
 
   // Admin Faculty Access state (Teachers only — Teachers cannot become Admin)
   const [facultyEmail, setFacultyEmail] = useState('');
@@ -191,6 +279,27 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [resetBusy, setResetBusy] = useState(false);
   const [resetFeedback, setResetFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
+  // Per-Classroom Live Quiz Launcher state
+  const [launcherGameId, setLauncherGameId] = useState<GameId>('quiz_master');
+  const [launcherDeckId, setLauncherDeckId] = useState<string>(() => publishedDecks[0]?.id || '');
+  const [adminTargetRoom, setAdminTargetRoom] = useState<string>(SLA_SECTIONS[6]);
+  const [launcherBusy, setLauncherBusy] = useState(false);
+  const [launcherFeedback, setLauncherFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Admin Student School ID Approval state
+  const [approvalFilter, setApprovalFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
+  const [approvalSearch, setApprovalSearch] = useState('');
+  const [inspectingUid, setInspectingUid] = useState<string | null>(null);
+  const [rejectingUid, setRejectingUid] = useState<string | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+  const [reviewBusyUid, setReviewBusyUid] = useState<string | null>(null);
+
+  // Admin Section Spelling Correction Requests state
+  const [sectionReqFilter, setSectionReqFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
+  const [sectionEdits, setSectionEdits] = useState<Record<string, string>>({});
+  const [sectionReviewNotes, setSectionReviewNotes] = useState<Record<string, string>>({});
+  const [sectionReviewBusyUid, setSectionReviewBusyUid] = useState<string | null>(null);
+
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
     return () => window.clearInterval(timer);
@@ -207,16 +316,83 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     setUseCustomTeacherSection(!SLA_SECTIONS.includes(nextSec));
   }, [teacherProfile.section]);
 
+  useEffect(() => {
+    if (publishedDecks.length > 0 && !publishedDecks.some((d) => d.id === launcherDeckId)) {
+      setLauncherDeckId(publishedDecks[0].id);
+    }
+  }, [publishedDecks, launcherDeckId]);
+
   const isAdmin = teacherProfile.role === 'admin';
+
+  // Ensure Admin never enters quiz builder or PPTX tabs
+  useEffect(() => {
+    if (isAdmin && (tab === 'builder' || tab === 'pptx')) {
+      setTab('live');
+    }
+  }, [isAdmin, tab]);
+
   const myTeachingSection = teacherProfile.section?.trim() || SLA_SECTIONS[6];
   const allStudents = allProfiles.filter((p) => p.role === 'student');
   const allTeachers = allProfiles.filter((p) => p.role === 'teacher');
+
+  const verificationByUid = new Map(schoolIdVerifications.map((v) => [v.uid, v]));
+  const studentApprovalRecords = allStudents.map((st) => {
+    const verif = verificationByUid.get(st.uid) || null;
+    const effectiveStatus: ApprovalStatus = st.approvalStatus || verif?.status || 'pending';
+    return {
+      student: st,
+      verification: verif,
+      status: effectiveStatus,
+      note: st.approvalNote || verif?.reviewNote || '',
+    };
+  });
+
+  const pendingApprovalsCount = studentApprovalRecords.filter((r) => r.status === 'pending').length;
+  const approvedStudentsCount = studentApprovalRecords.filter((r) => r.status === 'approved').length;
+  const rejectedApprovalsCount = studentApprovalRecords.filter((r) => r.status === 'rejected').length;
+
+  const filteredApprovalRecords = studentApprovalRecords.filter((rec) => {
+    if (approvalFilter !== 'all' && rec.status !== approvalFilter) return false;
+    const q = approvalSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      rec.student.displayName.toLowerCase().includes(q) ||
+      (rec.student.section || '').toLowerCase().includes(q) ||
+      (rec.verification?.schoolIdNumber || '').toLowerCase().includes(q) ||
+      (rec.verification?.email || '').toLowerCase().includes(q)
+    );
+  });
+
+  const inspectedApprovalItem = inspectingUid
+    ? studentApprovalRecords.find((r) => r.student.uid === inspectingUid) || null
+    : null;
+
+  const pendingSectionRequestsCount = sectionChangeRequests.filter((r) => r.status === 'pending').length;
+  const approvedSectionRequestsCount = sectionChangeRequests.filter((r) => r.status === 'approved').length;
+  const rejectedSectionRequestsCount = sectionChangeRequests.filter((r) => r.status === 'rejected').length;
+  const filteredSectionRequests = sectionChangeRequests.filter((r) =>
+    sectionReqFilter === 'all' ? true : r.status === sectionReqFilter
+  );
 
   const availableRoomSections = Array.from(
     new Set([
       ...SLA_SECTIONS,
       ...allStudents.map((s) => (s.section || '').trim()).filter(Boolean),
     ])
+  );
+
+  useEffect(() => {
+    if (adminRoomFilter !== 'ALL' && adminRoomFilter !== '__UNASSIGNED__') {
+      setAdminTargetRoom(adminRoomFilter);
+    }
+  }, [adminRoomFilter]);
+
+  const launcherTargetSection = isAdmin ? adminTargetRoom : myTeachingSection;
+  const launcherSelectedDeck =
+    publishedDecks.find((d) => d.id === launcherDeckId) || publishedDecks[0] || null;
+  const activeClassroomSessions = classroomSessions.filter((s) => s.status === 'active');
+  const activeSessionForTarget = activeClassroomSessions.find(
+    (s) => s.section.trim() === launcherTargetSection.trim()
   );
 
   // Scoped Classroom Room:
@@ -234,10 +410,9 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const unassignedStudents = allStudents.filter((s) => !(s.section || '').trim());
   const roomStudentIds = new Set(students.map((s) => s.uid));
 
-  const roomAlerts =
-    isAdmin && adminRoomFilter === 'ALL'
-      ? alerts
-      : alerts.filter((a) => roomStudentIds.has(a.studentId));
+  const roomAlerts = isAdmin
+    ? []
+    : alerts.filter((a) => roomStudentIds.has(a.studentId));
   const lockedAlerts = roomAlerts.filter((a) => a.status === 'locked');
 
   const onlineCount = students.filter((st) => getStudentPresence(st, nowMs).isOnline).length;
@@ -248,13 +423,9 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     return presenceFilter === 'online' ? isOnline : !isOnline;
   });
 
-  // Admin Campus-wide live monitoring metrics
+  // Admin Campus-wide live monitoring metrics (no pets, quizzes, or anti-cheat alerts)
   const onlineTeachersCount = allTeachers.filter((t) => getStudentPresence(t, nowMs).isOnline).length;
   const allOnlineStudentsCount = allStudents.filter((s) => getStudentPresence(s, nowMs).isOnline).length;
-  const inQuizStudentsCount = allStudents.filter(
-    (s) => getStudentPresence(s, nowMs).isOnline && /^(Playing|Hosting):/i.test(s.activeGame || '')
-  ).length;
-  const allLockedCampusCount = alerts.filter((a) => a.status === 'locked').length;
   const visibleTeachers = [...allTeachers]
     .filter((t) => {
       if (presenceFilter === 'all') return true;
@@ -271,21 +442,26 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const profileByUid = new Map(allProfiles.map((p) => [p.uid, p]));
   const campusActivityFeed = isAdmin
     ? [
-        ...records.slice(0, 12).map((r) => ({
+        ...schoolIdVerifications.slice(0, 10).map((v) => ({
+          id: `ver_${v.uid}`,
+          kind: (v.status === 'rejected' ? 'declined' : 'verification') as 'verification' | 'declined' | 'score',
+          actorName: v.studentName,
+          section: v.section || '',
+          detail:
+            v.status === 'approved'
+              ? `School ID #${v.schoolIdNumber} approved by ${v.reviewedBy || 'Admin'}`
+              : v.status === 'rejected'
+                ? `School ID #${v.schoolIdNumber} declined${v.reviewNote ? ` — ${v.reviewNote}` : ''}`
+                : `Submitted School ID #${v.schoolIdNumber} for student verification`,
+          ts: timestampToMillis(v.updatedAt) || timestampToMillis(v.submittedAt),
+        })),
+        ...records.slice(0, 10).map((r) => ({
           id: `rec_${r.id}`,
           kind: 'score' as const,
           actorName: r.studentName,
           section: profileByUid.get(r.studentId)?.section || '',
-          detail: `Completed ${r.gameTitle} (${r.subject}) · ${r.score} pts (${r.correctCount}/${r.totalCount})`,
+          detail: `Activity in ${r.subject} · ${r.score} pts`,
           ts: timestampToMillis(r.createdAt),
-        })),
-        ...alerts.slice(0, 12).map((al) => ({
-          id: `al_${al.id}`,
-          kind: 'alert' as const,
-          actorName: al.studentName,
-          section: profileByUid.get(al.studentId)?.section || '',
-          detail: `${al.status === 'locked' ? 'Locked in' : 'Allowed back in'} ${al.gameTitle} — ${al.reason}`,
-          ts: timestampToMillis(al.createdAt),
         })),
       ]
         .sort((a, b) => b.ts - a.ts)
@@ -301,6 +477,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     setQuestions([
       {
         id: `q_${Date.now()}`,
+        questionType: 'multiple_choice',
         prompt: '',
         answer: '',
         options: ['', '', '', ''],
@@ -308,6 +485,167 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
         category: deckSubject,
       },
     ]);
+  };
+
+  const handleToggleAiQuestionMix = (qType: QuestionType) => {
+    setAiQuestionMix((prev) => {
+      if (prev.includes(qType)) {
+        return prev.length > 1 ? prev.filter((t) => t !== qType) : prev;
+      }
+      return [...prev, qType];
+    });
+  };
+
+  const handleGenerateAiPptx = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanTopic = aiTopic.trim();
+    if (cleanTopic.length < 3) {
+      setAiError('Please enter a lesson topic (at least 3 characters).');
+      return;
+    }
+    setAiGenerating(true);
+    setAiError(null);
+    setAiPublishMsg(null);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) {
+        throw new Error('Please sign in again before generating a PowerPoint deck.');
+      }
+      const res = await fetch('/api/generate-pptx', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          topic: cleanTopic,
+          subject: aiSubject.trim() || 'General Education',
+          gradeLevel: aiGradeLevel.trim() || 'Grade 8',
+          slideCount: aiSlideCount,
+          questionCount: aiQuestionCount,
+          questionMix: aiQuestionMix,
+          notes: aiNotes.trim(),
+        }),
+      });
+      const payload = (await res.json()) as {
+        error?: string;
+        deckTitle?: string;
+        subject?: string;
+        gradeLevel?: string;
+        description?: string;
+        slides?: GeneratedSlide[];
+        questions?: QuizQuestion[];
+      };
+      if (!res.ok) {
+        throw new Error(payload.error || 'Could not generate PowerPoint slides.');
+      }
+      if (!payload.slides || payload.slides.length === 0) {
+        throw new Error('No slides were generated. Please adjust your topic and try again.');
+      }
+      setAiGeneratedResult({
+        deckTitle: payload.deckTitle || cleanTopic,
+        subject: payload.subject || aiSubject,
+        gradeLevel: payload.gradeLevel || aiGradeLevel,
+        description: payload.description || `${aiSubject} presentation on ${cleanTopic}`,
+        slides: payload.slides,
+        questions: payload.questions || [],
+      });
+      soundFx.playLevelUp();
+    } catch (err) {
+      soundFx.playWrong();
+      setAiError(err instanceof Error ? err.message : 'PowerPoint generation failed.');
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  const handleDownloadAiPptx = async () => {
+    if (!aiGeneratedResult) return;
+    setAiDownloadingPptx(true);
+    setAiError(null);
+    try {
+      await downloadGeneratedPptx({
+        title: aiGeneratedResult.deckTitle,
+        subject: aiGeneratedResult.subject,
+        gradeLevel: aiGeneratedResult.gradeLevel,
+        teacherName: teacherProfile.displayName,
+        slides: aiGeneratedResult.slides,
+        questions: aiGeneratedResult.questions,
+      });
+      soundFx.playCorrect();
+      setAiPublishMsg('PowerPoint (.pptx) downloaded!');
+    } catch (err) {
+      soundFx.playWrong();
+      setAiError(err instanceof Error ? err.message : 'Failed to build .pptx file.');
+    } finally {
+      setAiDownloadingPptx(false);
+    }
+  };
+
+  const handleLoadAiIntoBuilder = () => {
+    if (!aiGeneratedResult) return;
+    soundFx.playClick();
+    setEditingDeckId(null);
+    setDeckTitle(aiGeneratedResult.deckTitle.slice(0, 100));
+    setDeckSubject(aiGeneratedResult.subject.slice(0, 50));
+    setDeckDesc(aiGeneratedResult.description.slice(0, 240));
+    setDeckSourceType('pptx');
+    setDeckPublished(true);
+    setQuestions(
+      aiGeneratedResult.questions.map((q, idx) => ({
+        ...q,
+        id: q.id || `ai_q_${Date.now()}_${idx}`,
+        questionType: q.questionType || 'multiple_choice',
+        options: [q.options[0] || '', q.options[1] || '', q.options[2] || '', q.options[3] || ''],
+      }))
+    );
+    setBuilderFeedback({
+      type: 'ok',
+      text: `Loaded ${aiGeneratedResult.questions.length} AI-generated questions into Quiz Builder. Review or customize any item, then click Publish!`,
+    });
+    setTab('builder');
+    onSetActivity?.('Building Quiz Deck');
+  };
+
+  const handlePublishAiDirectly = async () => {
+    if (!aiGeneratedResult || aiGeneratedResult.questions.length === 0) return;
+    setAiPublishing(true);
+    setAiError(null);
+    setAiPublishMsg(null);
+    try {
+      const cleanSubject = aiGeneratedResult.subject.trim().slice(0, 50) || 'General';
+      const cleanedQuestions = aiGeneratedResult.questions
+        .filter((q) => q.prompt.trim() && q.answer.trim())
+        .slice(0, 50)
+        .map((q) => sanitizeQuestionForFirestore(q, cleanSubject));
+
+      if (cleanedQuestions.length === 0) {
+        throw new Error('Generated quiz contained no valid questions.');
+      }
+
+      const newDeckId = `deck_${Date.now()}`;
+      await onSaveDeck({
+        id: newDeckId,
+        title: aiGeneratedResult.deckTitle.trim().slice(0, 100),
+        subject: cleanSubject,
+        description: aiGeneratedResult.description.trim().slice(0, 240),
+        sourceType: 'pptx',
+        teacherId: teacherProfile.uid,
+        teacherName: teacherProfile.displayName,
+        questions: cleanedQuestions,
+        isPublished: true,
+      });
+      setLauncherDeckId(newDeckId);
+      soundFx.playLevelUp();
+      setAiPublishMsg(
+        `Published "${aiGeneratedResult.deckTitle}" (${cleanedQuestions.length} questions) to all 12 student games!`
+      );
+    } catch (err) {
+      soundFx.playWrong();
+      setAiError(err instanceof Error ? err.message : 'Could not publish generated quiz deck.');
+    } finally {
+      setAiPublishing(false);
+    }
   };
 
   const handlePptxUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -358,24 +696,105 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     soundFx.playLevelUp();
   };
 
-  const addBlankQuestion = () => {
+  const addBlankQuestion = (presetType: QuestionType = 'multiple_choice') => {
     if (questions.length >= 50) return;
     soundFx.playClick();
-    setQuestions((prev) => [
-      ...prev,
-      {
-        id: `q_${Date.now()}_${prev.length}`,
-        prompt: '',
-        answer: '',
-        options: ['', '', '', ''],
-        hint: '',
-        category: deckSubject,
-      },
-    ]);
+    const base: QuizQuestion = {
+      id: `q_${Date.now()}_${questions.length}`,
+      questionType: presetType,
+      prompt:
+        presetType === 'four_pics'
+          ? `4 Pics 1 Word: Identify the ${deckSubject} concept from these 4 visual clues.`
+          : '',
+      answer: '',
+      options: ['', '', '', ''],
+      hint: '',
+      category: deckSubject,
+    };
+    if (presetType === 'enumeration') {
+      base.enumerationItems = ['', '', ''];
+    }
+    if (presetType === 'four_pics') {
+      base.cluePanels = [
+        { label: '', emoji: '🔍' },
+        { label: '', emoji: '💡' },
+        { label: '', emoji: '📚' },
+        { label: '', emoji: '🧩' },
+      ];
+    }
+    setQuestions((prev) => [...prev, base]);
   };
 
   const updateQuestion = (index: number, patch: Partial<QuizQuestion>) => {
     setQuestions((prev) => prev.map((q, i) => (i === index ? { ...q, ...patch } : q)));
+  };
+
+  const handleChangeQuestionType = (index: number, nextType: QuestionType) => {
+    soundFx.playClick();
+    setQuestions((prev) =>
+      prev.map((q, i) => {
+        if (i !== index) return q;
+        const next: QuizQuestion = { ...q, questionType: nextType };
+        if (nextType === 'enumeration') {
+          const seedItems =
+            q.enumerationItems && q.enumerationItems.length >= 2
+              ? q.enumerationItems
+              : q.answer.includes(',')
+                ? q.answer.split(',').map((s) => s.trim()).filter(Boolean)
+                : [q.answer.trim(), '', ''];
+          next.enumerationItems = seedItems.length >= 2 ? seedItems : ['', ''];
+          next.answer = next.enumerationItems.filter(Boolean).join(', ');
+        }
+        if (nextType === 'four_pics') {
+          if (!q.cluePanels || q.cluePanels.length < 4) {
+            next.cluePanels = [
+              { label: q.cluePanels?.[0]?.label || '', emoji: q.cluePanels?.[0]?.emoji || '🔍', imageUrl: q.cluePanels?.[0]?.imageUrl },
+              { label: q.cluePanels?.[1]?.label || '', emoji: q.cluePanels?.[1]?.emoji || '💡', imageUrl: q.cluePanels?.[1]?.imageUrl },
+              { label: q.cluePanels?.[2]?.label || '', emoji: q.cluePanels?.[2]?.emoji || '📚', imageUrl: q.cluePanels?.[2]?.imageUrl },
+              { label: q.cluePanels?.[3]?.label || '', emoji: q.cluePanels?.[3]?.emoji || '🧩', imageUrl: q.cluePanels?.[3]?.imageUrl },
+            ];
+          }
+          if (!q.prompt.trim()) {
+            next.prompt = `4 Pics 1 Word: Decode the 4 visual clues to guess the ${deckSubject} term!`;
+          }
+        }
+        return next;
+      })
+    );
+  };
+
+  const handleUploadClueImage = async (qIdx: number, panelIdx: number, file: File | undefined) => {
+    if (!file) return;
+    setBuilderFeedback(null);
+    try {
+      const compressedUrl = await compressCluePhoto(file);
+      setQuestions((prev) =>
+        prev.map((q, i) => {
+          if (i !== qIdx) return q;
+          const basePanels: CluePanel[] =
+            q.cluePanels && q.cluePanels.length === 4
+              ? [...q.cluePanels]
+              : [
+                  { label: '', emoji: '🔍' },
+                  { label: '', emoji: '💡' },
+                  { label: '', emoji: '📚' },
+                  { label: '', emoji: '🧩' },
+                ];
+          basePanels[panelIdx] = {
+            ...basePanels[panelIdx],
+            imageUrl: compressedUrl,
+          };
+          return { ...q, cluePanels: basePanels };
+        })
+      );
+      soundFx.playCorrect();
+    } catch (err) {
+      soundFx.playWrong();
+      setBuilderFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to process clue image.',
+      });
+    }
   };
 
   const handleEditDeck = (deck: QuizDeck) => {
@@ -390,6 +809,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
       deck.questions.map((q, i) => ({
         ...q,
         id: q.id || `q_${Date.now()}_${i}`,
+        questionType: q.questionType || 'multiple_choice',
         options: [q.options[0] || '', q.options[1] || '', q.options[2] || '', q.options[3] || ''],
       }))
     );
@@ -401,45 +821,36 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const handlePublishDeck = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleaned = questions
-      .filter((q) => q.prompt.trim() && q.answer.trim())
+      .map((q) => {
+        if (q.questionType === 'enumeration' && q.enumerationItems) {
+          const validItems = q.enumerationItems.map((it) => it.trim()).filter(Boolean);
+          return {
+            ...q,
+            enumerationItems: validItems,
+            answer: validItems.join(', '),
+          };
+        }
+        return q;
+      })
+      .filter((q) => {
+        if (!q.prompt.trim()) return false;
+        if (q.questionType === 'enumeration') {
+          return Boolean(q.enumerationItems && q.enumerationItems.length >= 2);
+        }
+        return Boolean(q.answer.trim());
+      })
       .slice(0, 50)
-      .map((q, idx) => {
-        const ans = q.answer.trim();
-        const seen = new Set<string>([ans.toLowerCase()]);
-        const uniqueOpts: string[] = [ans];
-        for (const raw of q.options) {
-          const clean = raw.trim();
-          if (!clean) continue;
-          const key = clean.toLowerCase();
-          if (!seen.has(key)) {
-            seen.add(key);
-            uniqueOpts.push(clean);
-          }
-          if (uniqueOpts.length >= 4) break;
-        }
-        let fillerIdx = 1;
-        while (uniqueOpts.length < 4) {
-          const fb = `Option ${fillerIdx++}`;
-          if (!seen.has(fb.toLowerCase())) {
-            seen.add(fb.toLowerCase());
-            uniqueOpts.push(fb);
-          }
-        }
-        return {
-          ...q,
-          id: q.id || `q_${idx + 1}`,
-          prompt: q.prompt.trim(),
-          answer: ans,
-          options: uniqueOpts,
-          hint: q.hint.trim() || 'Think about the lesson topic',
-          category: (q.category || '').trim() || deckSubject.trim() || 'Core',
-        };
-      });
+      .map((q, idx) =>
+        sanitizeQuestionForFirestore(
+          { ...q, id: q.id || `q_${idx + 1}` },
+          deckSubject.trim() || 'Core'
+        )
+      );
 
     if (!deckTitle.trim() || !deckSubject.trim() || cleaned.length === 0) {
       setBuilderFeedback({
         type: 'err',
-        text: 'Please enter a deck title, subject, and at least one valid question & answer.',
+        text: 'Please enter a deck title, subject, and at least one valid question (for Enumeration, provide at least 2 items).',
       });
       return;
     }
@@ -481,7 +892,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
         soundFx.playLevelUp();
         setBuilderFeedback({
           type: 'ok',
-          text: `Published "${cleanTitle}" (${cleaned.length} questions) to all student mini-games!`,
+          text: `Published "${cleanTitle}" (${cleaned.length} questions) to all 12 student mini-games!`,
         });
       }
       resetBuilder();
@@ -498,8 +909,8 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Real-time Cheating Detector Alert Banner */}
-      {lockedAlerts.length > 0 && (
+      {/* Real-time Cheating Detector Alert Banner (Teachers only — removed from Admin) */}
+      {!isAdmin && lockedAlerts.length > 0 && (
         <div className="rounded-3xl border-2 border-red-500 bg-red-50 p-6 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -568,7 +979,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
         </div>
       )}
 
-      {/* Teacher Monitor Navigation & Actions */}
+      {/* Teacher / Admin Monitor Navigation & Actions */}
       <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
@@ -576,18 +987,23 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               San Lorenzo Academy · {isAdmin ? 'Administrator Console' : `Classroom Room: ${myTeachingSection}`}
             </p>
             <h2 className="text-2xl font-bold text-[#172A1E]">
-              {isAdmin ? 'Faculty & Admin Control Center' : `${myTeachingSection} — Teacher Room`}
+              {isAdmin ? 'Admin Monitoring & Student ID Approvals' : `${myTeachingSection} — Teacher Room`}
             </h2>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9]">
-              {[
-                { id: 'live', label: isAdmin ? 'Classrooms' : 'My Classroom' },
-                { id: 'pptx', label: 'Import PPTX' },
-                { id: 'builder', label: 'Quiz Builder' },
-                ...(isAdmin ? [{ id: 'admin', label: 'Admin & Secret Codes' }] : []),
-              ].map((t) => (
+              {(isAdmin
+                ? [
+                    { id: 'live', label: 'Monitor & Approvals' },
+                    { id: 'admin', label: 'Admin & Secret Codes' },
+                  ]
+                : [
+                    { id: 'live', label: 'My Classroom' },
+                    { id: 'pptx', label: 'PowerPoint & AI' },
+                    { id: 'builder', label: 'Quiz Builder' },
+                  ]
+              ).map((t) => (
                 <button
                   key={t.id}
                   type="button"
@@ -596,7 +1012,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                     const nextTab = t.id as MonitorTab;
                     setTab(nextTab);
                     if (nextTab === 'live') {
-                      onSetActivity?.(isAdmin ? 'Admin Live Monitor' : `Monitoring: ${myTeachingSection}`);
+                      onSetActivity?.(isAdmin ? 'Admin Control Center' : `Monitoring: ${myTeachingSection}`);
                     } else if (nextTab === 'pptx') {
                       onSetActivity?.('Importing PPTX Slides');
                     } else if (nextTab === 'builder') {
@@ -605,7 +1021,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                       onSetActivity?.('Admin & Secret Codes');
                     }
                   }}
-                  className={`px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                  className={`px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                     tab === t.id ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
                   }`}
                 >
@@ -614,17 +1030,30 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               ))}
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                soundFx.playQuack();
-                onLaunchTeacherGame('catch_the_duck');
-              }}
-              className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-            >
-              <Play className="w-3.5 h-3.5" />
-              Host Catch the Duck
-            </button>
+            {!isAdmin && (
+              <button
+                type="button"
+                onClick={async () => {
+                  soundFx.playQuack();
+                  if (launcherSelectedDeck && launcherTargetSection) {
+                    try {
+                      await onStartClassroomSession(
+                        launcherTargetSection,
+                        'catch_the_duck',
+                        launcherSelectedDeck
+                      );
+                    } catch {
+                      // Proceed to host screen even if broadcast fails
+                    }
+                  }
+                  onLaunchTeacherGame('catch_the_duck', launcherSelectedDeck?.id);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Play className="w-3.5 h-3.5" />
+                Host Catch the Duck
+              </button>
+            )}
           </div>
         </div>
 
@@ -752,6 +1181,243 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
 
       {tab === 'live' && (
         <div className="space-y-6">
+          {/* Live Classroom Quiz Launcher (Teachers only — removed from Admin) */}
+          {!isAdmin && (
+            <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
+                  <Radio className="w-3.5 h-3.5" />
+                  Live Classroom Quiz Control
+                </p>
+                <h3 className="text-lg font-bold text-[#172A1E] mt-0.5">
+                  Send Students in {launcherTargetSection} Straight to a Quiz
+                </h3>
+                <p className="text-xs text-[#4D6354]">
+                  Choose a quiz deck and mini-game for your classroom. Enrolled students in{' '}
+                  <strong>{launcherTargetSection}</strong> automatically open your selected quiz on their dashboard.
+                </p>
+              </div>
+              {activeSessionForTarget && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-[#1E5B3A] whitespace-nowrap">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    Live Now
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      onLaunchTeacherGame(activeSessionForTarget.gameId, activeSessionForTarget.deckId);
+                    }}
+                    className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Open Host View
+                  </button>
+                  <button
+                    type="button"
+                    disabled={launcherBusy}
+                    onClick={async () => {
+                      setLauncherBusy(true);
+                      setLauncherFeedback(null);
+                      try {
+                        await onEndClassroomSession(activeSessionForTarget.id);
+                        soundFx.playClick();
+                        setLauncherFeedback({
+                          type: 'ok',
+                          text: `Ended live classroom quiz for ${activeSessionForTarget.section}.`,
+                        });
+                      } catch (err) {
+                        soundFx.playWrong();
+                        setLauncherFeedback({
+                          type: 'err',
+                          text: err instanceof Error ? err.message : 'Unable to end live quiz.',
+                        });
+                      } finally {
+                        setLauncherBusy(false);
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+                  >
+                    <Square className="w-3 h-3 fill-current" />
+                    End Live Quiz
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {activeSessionForTarget && (
+              <div className="p-3.5 rounded-2xl bg-[#FAF8F2] border border-[#1E5B3A]/30 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div>
+                  <span className="font-bold text-[#1E5B3A]">
+                    Active in {activeSessionForTarget.section}:
+                  </span>{' '}
+                  <span className="font-bold text-[#172A1E]">{activeSessionForTarget.gameTitle}</span>
+                  <span className="text-[#4D6354]">
+                    {' '}
+                    · {activeSessionForTarget.subject}: {activeSessionForTarget.deckTitle} · Started by{' '}
+                    {activeSessionForTarget.teacherName}
+                  </span>
+                </div>
+                <span className="font-semibold text-[#EA7A26] tabular-nums">
+                  {
+                    allStudents.filter(
+                      (st) =>
+                        (st.section || '').trim() === activeSessionForTarget.section.trim() &&
+                        getStudentPresence(st, nowMs).isOnline &&
+                        st.activeGame === `Playing: ${activeSessionForTarget.gameTitle}`
+                    ).length
+                  }{' '}
+                  students inside game
+                </span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+              {isAdmin && (
+                <div className="md:col-span-3">
+                  <label className="block text-xs font-semibold text-[#172A1E] mb-1">
+                    Target Classroom
+                  </label>
+                  <select
+                    value={adminTargetRoom}
+                    onChange={(e) => {
+                      setAdminTargetRoom(e.target.value);
+                      setLauncherFeedback(null);
+                    }}
+                    aria-label="Target classroom section for live quiz"
+                    className="w-full px-3 py-2.5 rounded-xl border border-[#D8D0BC] bg-[#FAF8F2] text-xs font-semibold text-[#172A1E]"
+                  >
+                    {availableRoomSections.map((sec) => (
+                      <option key={sec} value={sec}>
+                        {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className={isAdmin ? 'md:col-span-4' : 'md:col-span-5'}>
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">
+                  Quiz Deck (Subject / Custom / PPTX)
+                </label>
+                <select
+                  value={launcherSelectedDeck?.id || ''}
+                  onChange={(e) => {
+                    setLauncherDeckId(e.target.value);
+                    setLauncherFeedback(null);
+                  }}
+                  aria-label="Choose quiz deck for classroom"
+                  className="w-full px-3 py-2.5 rounded-xl border border-[#D8D0BC] bg-[#FAF8F2] text-xs font-semibold text-[#172A1E]"
+                >
+                  {publishedDecks.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.subject}: {d.title} ({d.questions.length} Qs)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className={isAdmin ? 'md:col-span-3' : 'md:col-span-4'}>
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">
+                  Mini-Game Mode
+                </label>
+                <select
+                  value={launcherGameId}
+                  onChange={(e) => {
+                    setLauncherGameId(e.target.value as GameId);
+                    setLauncherFeedback(null);
+                  }}
+                  aria-label="Choose mini-game for classroom"
+                  className="w-full px-3 py-2.5 rounded-xl border border-[#D8D0BC] bg-[#FAF8F2] text-xs font-semibold text-[#172A1E]"
+                >
+                  {GAMES_CATALOG.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {String(g.number).padStart(2, '0')}. {g.title} ({g.modeLabel})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className={isAdmin ? 'md:col-span-2' : 'md:col-span-3'}>
+                <button
+                  type="button"
+                  disabled={launcherBusy || !launcherSelectedDeck || launcherSelectedDeck.questions.length === 0}
+                  onClick={async () => {
+                    if (!launcherSelectedDeck) return;
+                    setLauncherBusy(true);
+                    setLauncherFeedback(null);
+                    try {
+                      await onStartClassroomSession(
+                        launcherTargetSection,
+                        launcherGameId,
+                        launcherSelectedDeck
+                      );
+                      soundFx.playLevelUp();
+                      const gameName =
+                        GAMES_CATALOG.find((g) => g.id === launcherGameId)?.title || launcherGameId;
+                      setLauncherFeedback({
+                        type: 'ok',
+                        text: `Started "${gameName}" (${launcherSelectedDeck.title}) for ${launcherTargetSection}! Students in this section are entering now.`,
+                      });
+                    } catch (err) {
+                      soundFx.playWrong();
+                      setLauncherFeedback({
+                        type: 'err',
+                        text: err instanceof Error ? err.message : 'Could not start classroom quiz.',
+                      });
+                    } finally {
+                      setLauncherBusy(false);
+                    }
+                  }}
+                  className="w-full px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  {launcherBusy
+                    ? 'Starting...'
+                    : activeSessionForTarget
+                      ? 'Switch Live Quiz'
+                      : 'Start Class Quiz'}
+                </button>
+              </div>
+            </div>
+
+            {launcherFeedback && (
+              <p
+                className={`text-xs font-semibold ${
+                  launcherFeedback.type === 'ok' ? 'text-[#1E5B3A]' : 'text-red-700'
+                }`}
+              >
+                {launcherFeedback.text}
+              </p>
+            )}
+
+            {isAdmin && activeClassroomSessions.length > 0 && (
+              <div className="pt-3 border-t border-[#ECE7D8] flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-bold text-[#4D6354]">Active Rooms:</span>
+                {activeClassroomSessions.map((sess) => (
+                  <div
+                    key={sess.id}
+                    className="inline-flex items-center gap-2 px-3 py-1 rounded-xl bg-[#FAF8F2] border border-[#E5DEC9]"
+                  >
+                    <span className="font-bold text-[#172A1E]">{sess.section}</span>
+                    <span className="text-[#4D6354]">
+                      · {sess.gameTitle} ({sess.subject})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void onEndClassroomSession(sess.id)}
+                      className="text-red-600 font-bold hover:underline cursor-pointer"
+                    >
+                      End
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            </div>
+          )}
+
           {/* Admin Campus-Wide Overview Metrics */}
           {isAdmin && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -761,8 +1427,8 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                   <p className="text-2xl font-extrabold text-[#172A1E] mt-1 tabular-nums">
                     {allOnlineStudentsCount} <span className="text-sm font-semibold text-[#4D6354]">/ {allStudents.length}</span>
                   </p>
-                  <p className="text-[11px] font-semibold text-[#EA7A26] mt-0.5">
-                    {inQuizStudentsCount} actively in quiz
+                  <p className="text-[11px] font-semibold text-[#1E5B3A] mt-0.5">
+                    {approvedStudentsCount} verified enrolled
                   </p>
                 </div>
                 <div className="w-11 h-11 rounded-2xl bg-emerald-50 text-[#1E5B3A] flex items-center justify-center shrink-0">
@@ -787,29 +1453,465 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
 
               <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold text-[#4D6354]">Integrity Alerts</p>
-                  <p className={`text-2xl font-extrabold mt-1 tabular-nums ${allLockedCampusCount > 0 ? 'text-red-600' : 'text-[#1E5B3A]'}`}>
-                    {allLockedCampusCount} Locked
+                  <p className="text-xs font-semibold text-[#4D6354]">Pending ID Approvals</p>
+                  <p className={`text-2xl font-extrabold mt-1 tabular-nums ${pendingApprovalsCount > 0 ? 'text-[#EA7A26]' : 'text-[#1E5B3A]'}`}>
+                    {pendingApprovalsCount} Waiting
                   </p>
-                  <p className="text-[11px] text-[#4D6354] mt-0.5">{alerts.length} total strikes logged</p>
+                  <p className="text-[11px] text-[#4D6354] mt-0.5">
+                    Requires School ID verification
+                  </p>
                 </div>
-                <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${allLockedCampusCount > 0 ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-[#1E5B3A]'}`}>
-                  <AlertOctagon className="w-5 h-5" />
+                <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${pendingApprovalsCount > 0 ? 'bg-[#EA7A26]/15 text-[#EA7A26]' : 'bg-emerald-50 text-[#1E5B3A]'}`}>
+                  <IdCard className="w-5 h-5" />
                 </div>
               </div>
 
               <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold text-[#4D6354]">Classrooms &amp; Decks</p>
-                  <p className="text-2xl font-extrabold text-[#172A1E] mt-1 tabular-nums">
-                    {availableRoomSections.length} Rooms
+                  <p className="text-xs font-semibold text-[#4D6354]">Section Spelling Fixes</p>
+                  <p className={`text-2xl font-extrabold mt-1 tabular-nums ${pendingSectionRequestsCount > 0 ? 'text-[#EA7A26]' : 'text-[#1E5B3A]'}`}>
+                    {pendingSectionRequestsCount} Pending
                   </p>
-                  <p className="text-[11px] text-[#4D6354] mt-0.5">{customDecks.length} custom quiz decks</p>
+                  <p className="text-[11px] text-[#4D6354] mt-0.5">
+                    {approvedSectionRequestsCount} approved · {rejectedApprovalsCount} IDs declined
+                  </p>
                 </div>
-                <div className="w-11 h-11 rounded-2xl bg-[#EA7A26]/10 text-[#EA7A26] flex items-center justify-center shrink-0">
-                  <BookOpen className="w-5 h-5" />
+                <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${pendingSectionRequestsCount > 0 ? 'bg-[#EA7A26]/15 text-[#EA7A26]' : 'bg-[#FAF8F2] border border-[#E5DEC9] text-[#1E5B3A]'}`}>
+                  <Lock className="w-5 h-5" />
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Admin Student School ID Approvals Queue */}
+          {isAdmin && (
+            <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div>
+                  <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
+                    <IdCard className="w-4 h-4" />
+                    Campus Access Security
+                  </p>
+                  <h3 className="text-lg font-bold text-[#172A1E] mt-0.5">
+                    Student School ID Verification &amp; Approvals
+                  </h3>
+                  <p className="text-xs text-[#4D6354]">
+                    Inspect each student&apos;s uploaded San Lorenzo Academy School ID before allowing them into the platform so civilians cannot enter.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-[#4D6354] absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={approvalSearch}
+                      onChange={(e) => setApprovalSearch(e.target.value)}
+                      placeholder="Search name, ID#, section..."
+                      aria-label="Search student approvals"
+                      className="pl-8 pr-3 py-1.5 rounded-xl border border-[#D8D0BC] text-xs bg-white focus:outline-none focus:border-[#1E5B3A] w-48"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9] text-xs font-semibold">
+                    {[
+                      { id: 'pending', label: `Pending (${pendingApprovalsCount})` },
+                      { id: 'approved', label: `Approved (${approvedStudentsCount})` },
+                      { id: 'rejected', label: `Declined (${rejectedApprovalsCount})` },
+                      { id: 'all', label: `All (${studentApprovalRecords.length})` },
+                    ].map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setApprovalFilter(f.id as 'pending' | 'approved' | 'rejected' | 'all')}
+                        className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors whitespace-nowrap ${
+                          approvalFilter === f.id
+                            ? 'bg-[#1E5B3A] text-white'
+                            : 'text-[#4D6354] hover:text-[#172A1E]'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {filteredApprovalRecords.length === 0 ? (
+                <p className="text-sm text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
+                  {approvalFilter === 'pending'
+                    ? 'No students waiting for School ID approval right now.'
+                    : 'No student verification records match this filter.'}
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {filteredApprovalRecords.map(({ student, verification, status, note }) => {
+                    const isBusy = reviewBusyUid === student.uid;
+                    const isRejectingThis = rejectingUid === student.uid;
+                    return (
+                      <div
+                        key={student.uid}
+                        className={`p-4 rounded-2xl border space-y-3 ${
+                          status === 'pending'
+                            ? 'border-[#EA7A26]/50 bg-[#FFFDF8]'
+                            : status === 'rejected'
+                              ? 'border-red-200 bg-red-50/40'
+                              : 'border-[#E5DEC9] bg-[#FAF8F2]/60'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {student.photoUrl ? (
+                              <img
+                                src={student.photoUrl}
+                                alt={student.displayName}
+                                referrerPolicy="no-referrer"
+                                className="w-10 h-10 rounded-full object-cover border border-[#1E5B3A] shrink-0"
+                              />
+                            ) : (
+                              <div className="w-10 h-10 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border border-[#1E5B3A]/20 flex items-center justify-center font-bold text-xs shrink-0">
+                                {getInitials(student.displayName)}
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-[#172A1E] truncate">
+                                {student.displayName}
+                              </p>
+                              <p className="text-xs text-[#4D6354] truncate">
+                                {student.section || 'No section'}
+                                {verification?.email ? ` · ${verification.email}` : ''}
+                              </p>
+                              <p className="text-xs font-semibold text-[#1E5B3A] mt-0.5">
+                                School ID #:{' '}
+                                <span className="font-mono">
+                                  {verification?.schoolIdNumber || 'Not uploaded yet'}
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+
+                          <span
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border shrink-0 whitespace-nowrap ${
+                              status === 'approved'
+                                ? 'bg-emerald-50 text-[#1E5B3A] border-emerald-200'
+                                : status === 'rejected'
+                                  ? 'bg-red-50 text-red-700 border-red-200'
+                                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                            }`}
+                          >
+                            {status === 'approved'
+                              ? 'Approved'
+                              : status === 'rejected'
+                                ? 'Declined'
+                                : 'Pending Review'}
+                          </span>
+                        </div>
+
+                        {verification?.idPhotoUrl ? (
+                          <button
+                            type="button"
+                            onClick={() => setInspectingUid(student.uid)}
+                            className="w-full rounded-xl border border-[#E5DEC9] bg-white p-2 flex items-center justify-between gap-3 hover:border-[#1E5B3A] transition-colors cursor-pointer text-left"
+                          >
+                            <img
+                              src={verification.idPhotoUrl}
+                              alt={`${student.displayName} School ID`}
+                              className="h-20 w-32 object-contain rounded-lg bg-[#FAF8F2] border border-[#ECE7D8] shrink-0"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
+                                <Eye className="w-3.5 h-3.5 text-[#1E5B3A]" />
+                                Click to Inspect Full School ID
+                              </p>
+                              <p className="text-[11px] text-[#4D6354] mt-0.5">
+                                Submitted {formatLastSeen(timestampToMillis(verification.submittedAt), nowMs)}
+                              </p>
+                            </div>
+                          </button>
+                        ) : (
+                          <div className="p-3 rounded-xl bg-white border border-dashed border-[#D8D0BC] text-xs text-[#4D6354]">
+                            No School ID card image uploaded yet (legacy account or awaiting upload).
+                          </div>
+                        )}
+
+                        {status === 'rejected' && note && (
+                          <p className="text-xs text-red-700 bg-white border border-red-200 rounded-xl px-3 py-2">
+                            Decline note: {note}
+                          </p>
+                        )}
+
+                        {isRejectingThis ? (
+                          <div className="p-3 rounded-xl bg-white border border-red-200 space-y-2">
+                            <input
+                              type="text"
+                              maxLength={140}
+                              value={rejectReasonInput}
+                              onChange={(e) => setRejectReasonInput(e.target.value)}
+                              placeholder="Reason (e.g., ID unreadable or not an SLA student)"
+                              className="w-full px-3 py-2 rounded-lg border border-[#D8D0BC] text-xs focus:outline-none focus:border-red-500"
+                            />
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRejectingUid(null);
+                                  setRejectReasonInput('');
+                                }}
+                                className="px-3 py-1.5 rounded-lg border border-[#D8D0BC] text-xs font-semibold text-[#4D6354] cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isBusy || !onReviewStudentApproval}
+                                onClick={async () => {
+                                  if (!onReviewStudentApproval) return;
+                                  setReviewBusyUid(student.uid);
+                                  try {
+                                    await onReviewStudentApproval(
+                                      student.uid,
+                                      'rejected',
+                                      rejectReasonInput.trim() ||
+                                        'School ID could not be verified as an enrolled SLA student.'
+                                    );
+                                    soundFx.playWrong();
+                                    setRejectingUid(null);
+                                    setRejectReasonInput('');
+                                  } finally {
+                                    setReviewBusyUid(null);
+                                  }
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+                              >
+                                {isBusy ? 'Declining...' : 'Confirm Decline'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            {status !== 'rejected' && (
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => {
+                                  setRejectingUid(student.uid);
+                                  setRejectReasonInput(note || '');
+                                }}
+                                className="px-3 py-1.5 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                                Decline
+                              </button>
+                            )}
+                            {status !== 'approved' && (
+                              <button
+                                type="button"
+                                disabled={isBusy || !onReviewStudentApproval}
+                                onClick={async () => {
+                                  if (!onReviewStudentApproval) return;
+                                  setReviewBusyUid(student.uid);
+                                  try {
+                                    await onReviewStudentApproval(student.uid, 'approved', '');
+                                    soundFx.playCorrect();
+                                  } finally {
+                                    setReviewBusyUid(null);
+                                  }
+                                }}
+                                className="px-4 py-1.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                {isBusy ? 'Approving...' : 'Approve Student'}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Admin Section Spelling Correction Requests */}
+          {isAdmin && (
+            <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div>
+                  <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
+                    <Lock className="w-4 h-4" />
+                    Permanent Section Control
+                  </p>
+                  <h3 className="text-lg font-bold text-[#172A1E] mt-0.5">
+                    Section Spelling Correction Requests
+                  </h3>
+                  <p className="text-xs text-[#4D6354]">
+                    Student Grade &amp; Section is permanent after sign-in. Review and approve only genuine spelling corrections here.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9] text-xs font-semibold w-fit">
+                  {[
+                    { id: 'pending', label: `Pending (${pendingSectionRequestsCount})` },
+                    { id: 'approved', label: `Approved (${approvedSectionRequestsCount})` },
+                    { id: 'rejected', label: `Declined (${rejectedSectionRequestsCount})` },
+                    { id: 'all', label: `All (${sectionChangeRequests.length})` },
+                  ].map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setSectionReqFilter(f.id as 'pending' | 'approved' | 'rejected' | 'all')}
+                      className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors whitespace-nowrap ${
+                        sectionReqFilter === f.id
+                          ? 'bg-[#1E5B3A] text-white'
+                          : 'text-[#4D6354] hover:text-[#172A1E]'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {filteredSectionRequests.length === 0 ? (
+                <p className="text-sm text-[#4D6354] py-6 text-center bg-[#FAF8F2] rounded-2xl">
+                  {sectionReqFilter === 'pending'
+                    ? 'No students are requesting a section spelling correction right now.'
+                    : 'No section spelling requests match this filter.'}
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {filteredSectionRequests.map((req) => {
+                    const isBusy = sectionReviewBusyUid === req.uid;
+                    const draftSection =
+                      sectionEdits[req.uid] !== undefined ? sectionEdits[req.uid] : req.requestedSection;
+                    const draftNote =
+                      sectionReviewNotes[req.uid] !== undefined ? sectionReviewNotes[req.uid] : req.reviewNote;
+
+                    return (
+                      <div
+                        key={req.uid}
+                        className={`p-4 rounded-2xl border space-y-3 ${
+                          req.status === 'pending'
+                            ? 'border-[#EA7A26]/50 bg-[#FFFDF8]'
+                            : req.status === 'rejected'
+                              ? 'border-red-200 bg-red-50/40'
+                              : 'border-[#E5DEC9] bg-[#FAF8F2]/60'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-bold text-[#172A1E]">{req.studentName}</p>
+                            <p className="text-xs text-[#4D6354] mt-0.5">
+                              Current: <span className="line-through text-red-700">{req.currentSection}</span>{' '}
+                              → Requested: <strong className="text-[#1E5B3A]">{req.requestedSection}</strong>
+                            </p>
+                            <p className="text-xs text-[#4D6354] mt-1">
+                              Reason: <span className="text-[#172A1E]">{req.reason}</span>
+                            </p>
+                          </div>
+                          <span
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border shrink-0 whitespace-nowrap ${
+                              req.status === 'approved'
+                                ? 'bg-emerald-50 text-[#1E5B3A] border-emerald-200'
+                                : req.status === 'rejected'
+                                  ? 'bg-red-50 text-red-700 border-red-200'
+                                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                            }`}
+                          >
+                            {req.status === 'approved'
+                              ? 'Approved'
+                              : req.status === 'rejected'
+                                ? 'Declined'
+                                : 'Pending'}
+                          </span>
+                        </div>
+
+                        {req.status === 'pending' ? (
+                          <div className="space-y-2 pt-1">
+                            <div>
+                              <label className="block text-[11px] font-semibold text-[#172A1E] mb-1">
+                                Final Approved Section Spelling
+                              </label>
+                              <input
+                                type="text"
+                                maxLength={40}
+                                value={draftSection}
+                                onChange={(e) =>
+                                  setSectionEdits((prev) => ({ ...prev, [req.uid]: e.target.value }))
+                                }
+                                className="w-full px-3 py-1.5 rounded-xl border border-[#D8D0BC] bg-white text-xs font-semibold text-[#172A1E]"
+                              />
+                            </div>
+                            <input
+                              type="text"
+                              maxLength={140}
+                              value={draftNote}
+                              onChange={(e) =>
+                                setSectionReviewNotes((prev) => ({ ...prev, [req.uid]: e.target.value }))
+                              }
+                              placeholder="Optional Admin note (required if declining)..."
+                              className="w-full px-3 py-1.5 rounded-xl border border-[#D8D0BC] bg-white text-xs"
+                            />
+                            <div className="flex items-center justify-end gap-2 pt-1">
+                              <button
+                                type="button"
+                                disabled={isBusy || !onReviewSectionChange}
+                                onClick={async () => {
+                                  if (!onReviewSectionChange) return;
+                                  setSectionReviewBusyUid(req.uid);
+                                  try {
+                                    await onReviewSectionChange(
+                                      req.uid,
+                                      'rejected',
+                                      draftSection.trim() || req.requestedSection,
+                                      draftNote.trim() || 'Only spelling errors in your current section can be changed.'
+                                    );
+                                    soundFx.playWrong();
+                                  } finally {
+                                    setSectionReviewBusyUid(null);
+                                  }
+                                }}
+                                className="px-3 py-1.5 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                                Decline
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isBusy || !onReviewSectionChange || !draftSection.trim()}
+                                onClick={async () => {
+                                  if (!onReviewSectionChange) return;
+                                  setSectionReviewBusyUid(req.uid);
+                                  try {
+                                    await onReviewSectionChange(
+                                      req.uid,
+                                      'approved',
+                                      draftSection.trim(),
+                                      draftNote.trim()
+                                    );
+                                    soundFx.playCorrect();
+                                  } finally {
+                                    setSectionReviewBusyUid(null);
+                                  }
+                                }}
+                                className="px-3.5 py-1.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                {isBusy ? 'Saving...' : 'Approve Spelling Change'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-[#4D6354]">
+                            Reviewed by {req.reviewedBy || 'Admin'}
+                            {req.reviewNote ? ` · Note: ${req.reviewNote}` : ''}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -820,10 +1922,10 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                 <div>
                   <h3 className="text-lg font-bold text-[#172A1E] flex items-center gap-2">
                     <GraduationCap className="w-5 h-5 text-[#1E5B3A]" />
-                    Teachers Live Monitor — Who&apos;s Teaching &amp; What They Are Doing
+                    Teachers Live Monitor
                   </h3>
                   <p className="text-xs text-[#4D6354]">
-                    Monitor every teacher&apos;s online status, assigned classroom section, active task, and published decks in real time.
+                    Monitor every teacher&apos;s online status, assigned classroom section, and current activity in real time.
                   </p>
                 </div>
                 <span className="text-xs font-semibold text-[#1E5B3A] bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl tabular-nums">
@@ -845,20 +1947,18 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                         <th className="py-3 pr-4 font-semibold">Teacher</th>
                         <th className="py-3 pr-4 font-semibold">Presence</th>
                         <th className="py-3 pr-4 font-semibold">Assigned Classroom</th>
-                        <th className="py-3 pr-4 font-semibold">What They Are Doing</th>
-                        <th className="py-3 pr-4 font-semibold">Decks</th>
+                        <th className="py-3 pr-4 font-semibold">Current Activity</th>
                         <th className="py-3 font-semibold text-right">Room Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#F2EFE6]">
                       {visibleTeachers.map((t) => {
                         const presence = getStudentPresence(t, nowMs);
-                        const activity = getActivityBadge(t, presence.isOnline);
+                        const activity = getActivityBadge(t, presence.isOnline, true);
                         const teacherSec = (t.section || '').trim();
                         const roomStudentCount = teacherSec
                           ? allStudents.filter((s) => (s.section || '').trim() === teacherSec).length
                           : 0;
-                        const teacherDecksCount = customDecks.filter((d) => d.teacherId === t.uid).length;
                         const isInspectingThisRoom = Boolean(teacherSec && adminRoomFilter === teacherSec);
 
                         return (
@@ -874,13 +1974,9 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                                       className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A]"
                                     />
                                   ) : (
-                                    <PetAvatar
-                                      species={t.petSpecies}
-                                      color={t.petColor}
-                                      outfit={t.outfit}
-                                      accessory={t.accessory}
-                                      size={36}
-                                    />
+                                    <div className="w-9 h-9 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border border-[#1E5B3A]/20 flex items-center justify-center font-bold text-xs">
+                                      {getInitials(t.displayName)}
+                                    </div>
                                   )}
                                   <span
                                     title={presence.label}
@@ -928,9 +2024,6 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                                 {activity.label}
                               </span>
                             </td>
-                            <td className="py-3 pr-4 text-xs font-bold text-[#172A1E] tabular-nums">
-                              {teacherDecksCount}
-                            </td>
                             <td className="py-3 text-right">
                               {teacherSec ? (
                                 <button
@@ -967,11 +2060,13 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               <div>
                 <h3 className="text-lg font-bold text-[#172A1E]">
                   {isAdmin && activeRoomSection === 'ALL'
-                    ? 'All Students — Live Activity, Pet Progress & Integrity Status'
+                    ? 'All Students — Live Presence & Approval Status'
                     : `${activeRoomSection === '__UNASSIGNED__' ? 'Unassigned Students' : activeRoomSection} — Student Roster (${students.length})`}
                 </h3>
                 <p className="text-xs text-[#4D6354]">
-                  Track every student in real time: online/offline presence, what they are doing right now, pet level, quiz performance, and anti-cheat focus status.
+                  {isAdmin
+                    ? 'Monitor student online/offline presence, current classroom activity, and School ID verification status.'
+                    : 'Track every student in real time: online/offline presence, what they are doing right now, pet level, quiz performance, and anti-cheat focus status.'}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
@@ -1035,13 +2130,15 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                     <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
                       <th className="py-3 pr-4 font-semibold">Student</th>
                       <th className="py-3 pr-4 font-semibold">Presence</th>
-                      <th className="py-3 pr-4 font-semibold">What They Are Doing</th>
-                      <th className="py-3 pr-4 font-semibold">Pet Progress</th>
-                      <th className="py-3 pr-4 font-semibold">Care Avg</th>
+                      <th className="py-3 pr-4 font-semibold">{isAdmin ? 'Activity' : 'What They Are Doing'}</th>
+                      {!isAdmin && <th className="py-3 pr-4 font-semibold">Pet Progress</th>}
+                      {!isAdmin && <th className="py-3 pr-4 font-semibold">Care Avg</th>}
                       <th className="py-3 pr-4 font-semibold">Accuracy</th>
                       <th className="py-3 pr-4 font-semibold">Score</th>
-                      <th className="py-3 pr-4 font-semibold">Strikes</th>
-                      <th className="py-3 font-semibold text-right">Focus Status</th>
+                      {!isAdmin && <th className="py-3 pr-4 font-semibold">Strikes</th>}
+                      <th className="py-3 font-semibold text-right">
+                        {isAdmin ? 'ID Status' : 'Focus Status'}
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#F2EFE6]">
@@ -1054,7 +2151,8 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                       const matchingAlert = lockedAlerts.find((a) => a.studentId === st.uid);
                       const strikeCount = roomAlerts.filter((a) => a.studentId === st.uid).length;
                       const presence = getStudentPresence(st, nowMs);
-                      const activity = getActivityBadge(st, presence.isOnline);
+                      const activity = getActivityBadge(st, presence.isOnline, isAdmin);
+                      const approvalState: ApprovalStatus = st.approvalStatus || 'pending';
 
                       return (
                         <tr key={st.uid}>
@@ -1068,6 +2166,10 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                                     referrerPolicy="no-referrer"
                                     className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A]"
                                   />
+                                ) : isAdmin ? (
+                                  <div className="w-9 h-9 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border border-[#1E5B3A]/20 flex items-center justify-center font-bold text-xs">
+                                    {getInitials(st.displayName)}
+                                  </div>
                                 ) : (
                                   <PetAvatar
                                     species={st.petSpecies}
@@ -1117,29 +2219,51 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                               {activity.label}
                             </span>
                           </td>
-                          <td className="py-3 pr-4 text-[#4D6354] capitalize">
-                            {st.petName} · Lv. {st.petLevel}
-                          </td>
-                          <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{careAvg}%</td>
+                          {!isAdmin && (
+                            <td className="py-3 pr-4 text-[#4D6354] capitalize">
+                              {st.petName} · Lv. {st.petLevel}
+                            </td>
+                          )}
+                          {!isAdmin && (
+                            <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{careAvg}%</td>
+                          )}
                           <td className="py-3 pr-4 tabular-nums text-[#4D6354]">{acc}%</td>
                           <td className="py-3 pr-4 font-bold text-[#1E5B3A] tabular-nums">
                             {st.totalScore}
                           </td>
-                          <td className="py-3 pr-4 tabular-nums">
-                            <span
-                              className={`text-xs font-bold ${
-                                strikeCount >= 3
-                                  ? 'text-red-700'
-                                  : strikeCount > 0
-                                    ? 'text-[#EA7A26]'
-                                    : 'text-[#4D6354]'
-                              }`}
-                            >
-                              {strikeCount} {strikeCount === 1 ? 'Strike' : 'Strikes'}
-                            </span>
-                          </td>
+                          {!isAdmin && (
+                            <td className="py-3 pr-4 tabular-nums">
+                              <span
+                                className={`text-xs font-bold ${
+                                  strikeCount >= 3
+                                    ? 'text-red-700'
+                                    : strikeCount > 0
+                                      ? 'text-[#EA7A26]'
+                                      : 'text-[#4D6354]'
+                                }`}
+                              >
+                                {strikeCount} {strikeCount === 1 ? 'Strike' : 'Strikes'}
+                              </span>
+                            </td>
+                          )}
                           <td className="py-3 text-right">
-                            {st.lockedOut ? (
+                            {isAdmin ? (
+                              <span
+                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold border ${
+                                  approvalState === 'approved'
+                                    ? 'bg-emerald-50 text-[#1E5B3A] border-emerald-200'
+                                    : approvalState === 'rejected'
+                                      ? 'bg-red-50 text-red-700 border-red-200'
+                                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}
+                              >
+                                {approvalState === 'approved'
+                                  ? 'Approved'
+                                  : approvalState === 'rejected'
+                                    ? 'Declined'
+                                    : 'Pending ID'}
+                              </span>
+                            ) : st.lockedOut ? (
                               <button
                                 type="button"
                                 onClick={() => {
@@ -1195,7 +2319,11 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                       >
                         <div className="min-w-0">
                           <p className="text-xs font-bold text-[#172A1E] truncate">{st.displayName}</p>
-                          <p className="text-[11px] text-[#4D6354] truncate">Pet: {st.petName}</p>
+                          <p className="text-[11px] text-[#4D6354] truncate">
+                            {isAdmin
+                              ? `Status: ${st.approvalStatus || 'pending'}`
+                              : `Pet: ${st.petName}`}
+                          </p>
                         </div>
                         <button
                           type="button"
@@ -1220,7 +2348,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               </div>
             )}
 
-            {roomAlerts.length > 0 && (
+            {!isAdmin && roomAlerts.length > 0 && (
               <div className="pt-5 border-t border-[#ECE7D8] space-y-3">
                 <div>
                   <h4 className="text-sm font-bold text-[#172A1E]">
@@ -1264,7 +2392,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                     Recent School Activity Feed
                   </h3>
                   <p className="text-xs text-[#4D6354]">
-                    Latest quiz completions and integrity events across all San Lorenzo Academy classrooms.
+                    Latest School ID verifications, approvals, and classroom participation across San Lorenzo Academy.
                   </p>
                 </div>
                 <span className="text-xs font-semibold text-[#4D6354]">
@@ -1274,7 +2402,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
 
               {campusActivityFeed.length === 0 ? (
                 <p className="text-sm text-[#4D6354] py-6 text-center bg-[#FAF8F2] rounded-2xl">
-                  No quiz completions or integrity events recorded yet.
+                  No student verification or classroom activity recorded yet.
                 </p>
               ) : (
                 <div className="divide-y divide-[#F2EFE6]">
@@ -1283,7 +2411,11 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                       <div className="flex items-start gap-2.5 min-w-0">
                         <span
                           className={`mt-1 w-2 h-2 rounded-full shrink-0 ${
-                            item.kind === 'alert' ? 'bg-red-500' : 'bg-emerald-500'
+                            item.kind === 'declined'
+                              ? 'bg-red-500'
+                              : item.kind === 'verification'
+                                ? 'bg-[#EA7A26]'
+                                : 'bg-emerald-500'
                           }`}
                         />
                         <div className="min-w-0">
@@ -1293,7 +2425,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                               <span className="text-[#4D6354]"> · {item.section}</span>
                             )}
                           </p>
-                          <p className={item.kind === 'alert' ? 'text-red-700 font-medium mt-0.5' : 'text-[#4D6354] mt-0.5'}>
+                          <p className={item.kind === 'declined' ? 'text-red-700 font-medium mt-0.5' : 'text-[#4D6354] mt-0.5'}>
                             {item.detail}
                           </p>
                         </div>
@@ -1310,61 +2442,310 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
         </div>
       )}
 
-      {tab === 'pptx' && (
-        <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-6">
-          <div>
-            <h3 className="text-lg font-bold text-[#172A1E]">
-              Insert PowerPoint (.pptx) to Create Quiz Game
-            </h3>
-            <p className="text-xs text-[#4D6354] mt-1">
-              Upload your lecture PowerPoint file. LORENZONE reads your slide XML locally and turns slide titles, &quot;Term: Definition&quot; bullets, and &quot;Q:/A:&quot; pairs into a playable quiz deck for all 11 games.
-            </p>
-          </div>
+      {!isAdmin && tab === 'pptx' && (
+        <div className="space-y-6">
+          {/* AI PowerPoint (.pptx) & Quiz Generator */}
+          <form
+            onSubmit={(e) => void handleGenerateAiPptx(e)}
+            className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-5"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
+                  <Wand2 className="w-3.5 h-3.5" />
+                  Teacher Workload Saver
+                </p>
+                <h3 className="text-lg font-bold text-[#172A1E] mt-0.5 flex items-center gap-2">
+                  <Presentation className="w-5 h-5 text-[#1E5B3A]" />
+                  Generate PowerPoint (.pptx) &amp; Quiz Automatically
+                </h3>
+                <p className="text-xs text-[#4D6354] mt-1">
+                  Enter your lesson topic and desired question formats. LORENZONE creates formatted lecture slides to download as a real <code>.pptx</code> file plus a ready-to-play quiz deck.
+                </p>
+              </div>
+            </div>
 
-          <label className="block border-2 border-dashed border-[#1E5B3A]/40 hover:border-[#1E5B3A] rounded-2xl p-8 text-center bg-[#FAF8F2] cursor-pointer transition-colors">
-            <UploadCloud className="w-10 h-10 text-[#1E5B3A] mx-auto mb-3" />
-            <p className="text-sm font-bold text-[#172A1E]">Click to upload a .pptx PowerPoint file</p>
-            <p className="text-xs text-[#4D6354] mt-1">
-              Supports standard PowerPoint presentations (.pptx)
-            </p>
-            <input
-              type="file"
-              accept=".pptx"
-              onChange={(e) => void handlePptxUpload(e)}
-              className="hidden"
-            />
-          </label>
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5">
+              <div className="md:col-span-5">
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">
+                  Lesson Topic / Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={120}
+                  value={aiTopic}
+                  onChange={(e) => setAiTopic(e.target.value)}
+                  placeholder="e.g., Photosynthesis and Cellular Energy"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm"
+                />
+              </div>
 
-          {pptxStatus && (
-            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-[#1E5B3A]">
-              {pptxStatus}
+              <div className="md:col-span-3">
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">Subject</label>
+                <input
+                  type="text"
+                  required
+                  maxLength={50}
+                  value={aiSubject}
+                  onChange={(e) => setAiSubject(e.target.value)}
+                  placeholder="e.g., Science, Math, Filipino"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">Grade Level</label>
+                <select
+                  value={aiGradeLevel}
+                  onChange={(e) => setAiGradeLevel(e.target.value)}
+                  aria-label="Target grade level"
+                  className="w-full px-3 py-2.5 rounded-xl border border-[#D8D0BC] bg-[#FAF8F2] text-sm font-semibold text-[#172A1E]"
+                >
+                  {['Grade 7', 'Grade 8', 'Grade 9', 'Grade 10', 'Grade 11', 'Grade 12'].map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-1">
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">Slides</label>
+                <input
+                  type="number"
+                  min={4}
+                  max={12}
+                  value={aiSlideCount}
+                  onChange={(e) => setAiSlideCount(Math.max(4, Math.min(12, Number(e.target.value) || 6)))}
+                  className="w-full px-3 py-2.5 rounded-xl border border-[#D8D0BC] text-sm tabular-nums"
+                />
+              </div>
+
+              <div className="md:col-span-1">
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1">Quiz Qs</label>
+                <input
+                  type="number"
+                  min={3}
+                  max={15}
+                  value={aiQuestionCount}
+                  onChange={(e) => setAiQuestionCount(Math.max(3, Math.min(15, Number(e.target.value) || 6)))}
+                  className="w-full px-3 py-2.5 rounded-xl border border-[#D8D0BC] text-sm tabular-nums"
+                />
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-semibold text-[#172A1E] mb-2">
+                Question Formats to Generate
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    'identification',
+                    'fill_in_blank',
+                    'enumeration',
+                    'four_pics',
+                    'multiple_choice',
+                  ] as QuestionType[]
+                ).map((qType) => {
+                  const active = aiQuestionMix.includes(qType);
+                  return (
+                    <button
+                      key={qType}
+                      type="button"
+                      onClick={() => handleToggleAiQuestionMix(qType)}
+                      className={`px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+                        active
+                          ? 'bg-[#1E5B3A] border-[#1E5B3A] text-white'
+                          : 'bg-[#FAF8F2] border-[#D8D0BC] text-[#4D6354] hover:border-[#1E5B3A]'
+                      }`}
+                    >
+                      {active ? '✓ ' : ''}
+                      {QUESTION_TYPE_LABELS[qType]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#172A1E] mb-1">
+                Optional Teaching Objectives or Key Points to Include
+              </label>
+              <textarea
+                rows={2}
+                maxLength={1200}
+                value={aiNotes}
+                onChange={(e) => setAiNotes(e.target.value)}
+                placeholder="Optional: e.g., Focus on light-dependent reactions, Calvin cycle, and examples in Philippine crops."
+                className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-xs focus:outline-none focus:border-[#1E5B3A]"
+              />
+            </div>
+
+            {aiError && (
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700">
+                {aiError}
+              </div>
+            )}
+
+            {aiPublishMsg && (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-[#1E5B3A] flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                {aiPublishMsg}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-[11px] text-[#4D6354]">
+                Generates {aiSlideCount} lecture slides + {aiQuestionCount} ready-to-play questions.
+              </span>
+              <button
+                type="submit"
+                disabled={aiGenerating}
+                className="px-5 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-2 cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+              >
+                {aiGenerating ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating Slides &amp; Quiz...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Generate PowerPoint &amp; Quiz
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+
+          {aiGeneratedResult && (
+            <div className="bg-white rounded-3xl border border-[#1E5B3A]/30 p-6 sm:p-8 space-y-5">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-[#ECE7D8] pb-4">
+                <div>
+                  <p className="text-xs font-bold text-[#EA7A26]">
+                    Ready · {aiGeneratedResult.subject} · {aiGeneratedResult.gradeLevel}
+                  </p>
+                  <h4 className="text-xl font-bold text-[#172A1E]">{aiGeneratedResult.deckTitle}</h4>
+                  <p className="text-xs text-[#4D6354] mt-0.5">
+                    {aiGeneratedResult.slides.length} content slides + cover &amp; review slides ·{' '}
+                    {aiGeneratedResult.questions.length} quiz questions
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    disabled={aiDownloadingPptx}
+                    onClick={() => void handleDownloadAiPptx()}
+                    className="px-4 py-2.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+                  >
+                    <Download className="w-4 h-4" />
+                    {aiDownloadingPptx ? 'Building .pptx...' : 'Download .pptx'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleLoadAiIntoBuilder}
+                    className="px-4 py-2.5 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Edit in Quiz Builder
+                  </button>
+                  <button
+                    type="button"
+                    disabled={aiPublishing}
+                    onClick={() => void handlePublishAiDirectly()}
+                    className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+                  >
+                    {aiPublishing ? 'Publishing...' : 'Publish Quiz Now'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {aiGeneratedResult.slides.map((s) => (
+                  <div
+                    key={s.slideNumber}
+                    className="rounded-2xl border border-[#E5DEC9] bg-[#FAF8F2] p-4 flex flex-col justify-between space-y-3"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-bold text-[#4D6354] tabular-nums">
+                        <span>Slide {s.slideNumber}</span>
+                        <span className="text-[#1E5B3A] truncate max-w-[140px]">{s.subtitle}</span>
+                      </div>
+                      <h5 className="text-sm font-bold text-[#172A1E] leading-snug">{s.title}</h5>
+                      <ul className="space-y-1 text-xs text-[#4D6354] list-disc pl-4">
+                        {s.bullets.map((b, bIdx) => (
+                          <li key={bIdx}>{b}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="pt-2 border-t border-[#E5DEC9] text-[11px]">
+                      <p className="font-bold text-[#C65B10]">{s.keyTerm}</p>
+                      <p className="text-[#4D6354] mt-1 italic">Note: {s.speakerNote}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
-          <div className="pt-4 border-t border-[#ECE7D8] space-y-3">
-            <p className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
-              <FileUp className="w-4 h-4 text-[#EA7A26]" />
-              Or Paste Slide Notes Directly
-            </p>
-            <textarea
-              rows={5}
-              value={pptxTextFallback}
-              onChange={(e) => setPptxTextFallback(e.target.value)}
-              placeholder={`Slide 1 Title: Cell Biology\nMitochondria: Powerhouse of the cell\nNucleus: Control center holding DNA\n\nSlide 2 Title: Photosynthesis\nQ: What gas do plants release?\nAnswer: Oxygen`}
-              className="w-full p-3.5 rounded-xl border border-[#D8D0BC] text-xs font-mono focus:outline-none focus:border-[#1E5B3A]"
-            />
-            <button
-              type="button"
-              onClick={handleConvertTextSlides}
-              className="px-5 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer"
-            >
-              Convert Slide Notes to Quiz
-            </button>
+          {/* Local PPTX File Importer & Notes Converter */}
+          <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-6">
+            <div>
+              <h3 className="text-lg font-bold text-[#172A1E]">
+                Upload Existing PowerPoint (.pptx) to Create Quiz Game
+              </h3>
+              <p className="text-xs text-[#4D6354] mt-1">
+                Already have a presentation? Upload your <code>.pptx</code> file. LORENZONE reads your slide XML locally and turns slide titles, &quot;Term: Definition&quot; bullets, and &quot;Q:/A:&quot; pairs into a playable quiz deck for all 12 games.
+              </p>
+            </div>
+
+            <label className="block border-2 border-dashed border-[#1E5B3A]/40 hover:border-[#1E5B3A] rounded-2xl p-8 text-center bg-[#FAF8F2] cursor-pointer transition-colors">
+              <UploadCloud className="w-10 h-10 text-[#1E5B3A] mx-auto mb-3" />
+              <p className="text-sm font-bold text-[#172A1E]">Click to upload a .pptx PowerPoint file</p>
+              <p className="text-xs text-[#4D6354] mt-1">
+                Supports standard PowerPoint presentations (.pptx)
+              </p>
+              <input
+                type="file"
+                accept=".pptx"
+                onChange={(e) => void handlePptxUpload(e)}
+                className="hidden"
+              />
+            </label>
+
+            {pptxStatus && (
+              <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-[#1E5B3A]">
+                {pptxStatus}
+              </div>
+            )}
+
+            <div className="pt-4 border-t border-[#ECE7D8] space-y-3">
+              <p className="text-xs font-bold text-[#172A1E] flex items-center gap-1.5">
+                <FileUp className="w-4 h-4 text-[#EA7A26]" />
+                Or Paste Slide Notes Directly
+              </p>
+              <textarea
+                rows={5}
+                value={pptxTextFallback}
+                onChange={(e) => setPptxTextFallback(e.target.value)}
+                placeholder={`Slide 1 Title: Cell Biology\nMitochondria: Powerhouse of the cell\nNucleus: Control center holding DNA\n\nSlide 2 Title: Photosynthesis\nQ: What gas do plants release?\nAnswer: Oxygen`}
+                className="w-full p-3.5 rounded-xl border border-[#D8D0BC] text-xs font-mono focus:outline-none focus:border-[#1E5B3A]"
+              />
+              <button
+                type="button"
+                onClick={handleConvertTextSlides}
+                className="px-5 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer"
+              >
+                Convert Slide Notes to Quiz
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {tab === 'builder' && (
+      {!isAdmin && tab === 'builder' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           <form
             onSubmit={handlePublishDeck}
@@ -1427,68 +2808,300 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             </label>
 
             <div className="space-y-4">
-              {questions.map((q, idx) => (
-                <div key={q.id} className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-[#1E5B3A]">Question #{idx + 1}</span>
-                    {questions.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={() => setQuestions((prev) => prev.filter((_, i) => i !== idx))}
-                        className="text-xs text-red-600 hover:underline cursor-pointer"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                  <input
-                    type="text"
-                    placeholder="Question prompt..."
-                    value={q.prompt}
-                    onChange={(e) => updateQuestion(idx, { prompt: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
-                  />
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    <input
-                      type="text"
-                      placeholder="Exact Answer (e.g., PHOTOSYNTHESIS)"
-                      value={q.answer}
-                      onChange={(e) => updateQuestion(idx, { answer: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm font-semibold"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Hint (for Lorenscape / Brainzone)"
-                      value={q.hint}
-                      onChange={(e) => updateQuestion(idx, { hint: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Category (for Sorting Squad)"
-                      value={q.category || ''}
-                      onChange={(e) => updateQuestion(idx, { category: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {[0, 1, 2, 3].map((oIdx) => (
+              {questions.map((q, idx) => {
+                const qType: QuestionType = q.questionType || 'multiple_choice';
+                const enumItems = q.enumerationItems && q.enumerationItems.length > 0 ? q.enumerationItems : ['', ''];
+                const cluePanels: CluePanel[] =
+                  q.cluePanels && q.cluePanels.length >= 4
+                    ? q.cluePanels.slice(0, 4)
+                    : [
+                        { label: '', emoji: '🔍' },
+                        { label: '', emoji: '💡' },
+                        { label: '', emoji: '📚' },
+                        { label: '', emoji: '🧩' },
+                      ];
+
+                return (
+                  <div key={q.id} className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <span className="text-xs font-bold text-[#1E5B3A] tabular-nums">
+                          Question #{idx + 1}
+                        </span>
+                        <select
+                          value={qType}
+                          onChange={(e) => handleChangeQuestionType(idx, e.target.value as QuestionType)}
+                          aria-label={`Question ${idx + 1} format`}
+                          className="px-2.5 py-1 rounded-lg border border-[#D8D0BC] bg-white text-xs font-bold text-[#172A1E]"
+                        >
+                          <option value="multiple_choice">Multiple Choice</option>
+                          <option value="identification">Identification</option>
+                          <option value="fill_in_blank">Fill in the Blank</option>
+                          <option value="enumeration">Enumeration</option>
+                          <option value="four_pics">4 Pics 1 Word</option>
+                        </select>
+                      </div>
+                      {questions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setQuestions((prev) => prev.filter((_, i) => i !== idx))}
+                          className="text-xs text-red-600 hover:underline cursor-pointer"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Prompt input + quick Insert Blank for Fill in the Blank */}
+                    <div className="flex flex-col sm:flex-row gap-2">
                       <input
-                        key={oIdx}
                         type="text"
-                        placeholder={`Choice ${oIdx + 1}`}
-                        value={q.options[oIdx] || ''}
-                        onChange={(e) => {
-                          const nextOpts = [...q.options];
-                          nextOpts[oIdx] = e.target.value;
-                          updateQuestion(idx, { options: nextOpts });
-                        }}
-                        className="px-2.5 py-1.5 rounded-lg border border-[#D8D0BC] bg-white text-xs"
+                        placeholder={
+                          qType === 'fill_in_blank'
+                            ? 'Sentence with _____ blank (e.g., Plants absorb _____ during photosynthesis.)'
+                            : qType === 'enumeration'
+                              ? 'Enumeration prompt (e.g., Enumerate the 3 states of matter)'
+                              : qType === 'four_pics'
+                                ? 'Optional clue question or category context...'
+                                : qType === 'identification'
+                                  ? 'Identification prompt (e.g., What organelle produces ATP energy?)'
+                                  : 'Question prompt...'
+                        }
+                        value={q.prompt}
+                        onChange={(e) => updateQuestion(idx, { prompt: e.target.value })}
+                        className="flex-1 px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
                       />
-                    ))}
+                      {qType === 'fill_in_blank' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const base = q.prompt.trimEnd();
+                            updateQuestion(idx, { prompt: base ? `${base} _____ ` : '_____ ' });
+                          }}
+                          className="px-3 py-2 rounded-xl border border-[#1E5B3A] bg-white text-[#1E5B3A] text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          + Insert Blank (_____)
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Tailored inputs by Question Type */}
+                    {qType === 'enumeration' ? (
+                      <div className="space-y-2 p-3 rounded-xl bg-white border border-[#E5DEC9]">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-bold text-[#172A1E]">
+                            Enumeration Answers ({enumItems.length} items — any order accepted)
+                          </p>
+                          {enumItems.length < 8 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateQuestion(idx, {
+                                  enumerationItems: [...enumItems, ''],
+                                })
+                              }
+                              className="text-xs font-bold text-[#1E5B3A] hover:underline cursor-pointer"
+                            >
+                              + Add Item
+                            </button>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {enumItems.map((itemVal, itemIdx) => (
+                            <div key={itemIdx} className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                placeholder={`Item #${itemIdx + 1}`}
+                                value={itemVal}
+                                onChange={(e) => {
+                                  const nextItems = [...enumItems];
+                                  nextItems[itemIdx] = e.target.value;
+                                  updateQuestion(idx, {
+                                    enumerationItems: nextItems,
+                                    answer: nextItems.map((s) => s.trim()).filter(Boolean).join(', '),
+                                  });
+                                }}
+                                className="flex-1 px-2.5 py-1.5 rounded-lg border border-[#D8D0BC] text-xs font-semibold"
+                              />
+                              {enumItems.length > 2 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const nextItems = enumItems.filter((_, k) => k !== itemIdx);
+                                    updateQuestion(idx, {
+                                      enumerationItems: nextItems,
+                                      answer: nextItems.map((s) => s.trim()).filter(Boolean).join(', '),
+                                    });
+                                  }}
+                                  className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
+                                  aria-label={`Remove item ${itemIdx + 1}`}
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <input
+                          type="text"
+                          placeholder={
+                            qType === 'four_pics'
+                              ? 'Hidden 1-Word Answer (e.g., GRAVITY)'
+                              : qType === 'fill_in_blank'
+                                ? 'Missing Word/Phrase'
+                                : 'Exact Answer (e.g., PHOTOSYNTHESIS)'
+                          }
+                          value={q.answer}
+                          onChange={(e) => updateQuestion(idx, { answer: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm font-semibold"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Hint (for Lorenscape / 4 Pics)"
+                          value={q.hint}
+                          onChange={(e) => updateQuestion(idx, { hint: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Category (for Sorting Squad)"
+                          value={q.category || ''}
+                          onChange={(e) => updateQuestion(idx, { category: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {qType === 'enumeration' && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <input
+                          type="text"
+                          placeholder="Hint (e.g., Think about ice, water, and steam)"
+                          value={q.hint}
+                          onChange={(e) => updateQuestion(idx, { hint: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Category (for Sorting Squad)"
+                          value={q.category || ''}
+                          onChange={(e) => updateQuestion(idx, { category: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {/* 4 Pics 1 Word Visual Clue Editor */}
+                    {qType === 'four_pics' && (
+                      <div className="p-3 rounded-xl bg-white border border-[#E5DEC9] space-y-2.5">
+                        <p className="text-xs font-bold text-[#EA7A26]">
+                          4 Picture Clue Panels (Upload photos or pick visual icons + short captions)
+                        </p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          {cluePanels.map((panel, pIdx) => (
+                            <div
+                              key={pIdx}
+                              className="p-2.5 rounded-xl bg-[#FAF8F2] border border-[#E5DEC9] flex items-center gap-2.5"
+                            >
+                              {panel.imageUrl ? (
+                                <div className="relative w-12 h-12 rounded-lg overflow-hidden border border-[#D8D0BC] shrink-0">
+                                  <img
+                                    src={panel.imageUrl}
+                                    alt={panel.label || `Clue ${pIdx + 1}`}
+                                    referrerPolicy="no-referrer"
+                                    className="w-full h-full object-cover"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const nextPanels = [...cluePanels];
+                                      nextPanels[pIdx] = { label: panel.label, emoji: panel.emoji || '🔍' };
+                                      updateQuestion(idx, { cluePanels: nextPanels });
+                                    }}
+                                    className="absolute top-0 right-0 bg-red-600 text-white p-0.5 cursor-pointer"
+                                    aria-label={`Remove photo ${pIdx + 1}`}
+                                  >
+                                    <X className="w-2.5 h-2.5" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <input
+                                  type="text"
+                                  maxLength={4}
+                                  value={panel.emoji || '🔍'}
+                                  onChange={(e) => {
+                                    const nextPanels = [...cluePanels];
+                                    nextPanels[pIdx] = { ...panel, emoji: e.target.value };
+                                    updateQuestion(idx, { cluePanels: nextPanels });
+                                  }}
+                                  aria-label={`Clue ${pIdx + 1} emoji`}
+                                  className="w-11 h-11 rounded-lg border border-[#D8D0BC] bg-white text-center text-xl shrink-0"
+                                />
+                              )}
+                              <div className="flex-1 min-w-0 space-y-1">
+                                <input
+                                  type="text"
+                                  maxLength={40}
+                                  placeholder={`Pic #${pIdx + 1} clue label`}
+                                  value={panel.label}
+                                  onChange={(e) => {
+                                    const nextPanels = [...cluePanels];
+                                    nextPanels[pIdx] = { ...panel, label: e.target.value };
+                                    updateQuestion(idx, { cluePanels: nextPanels });
+                                  }}
+                                  className="w-full px-2 py-1 rounded-lg border border-[#D8D0BC] bg-white text-xs"
+                                />
+                                <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E5B3A] hover:underline cursor-pointer">
+                                  <ImagePlus className="w-3 h-3" />
+                                  {panel.imageUrl ? 'Replace Photo' : 'Upload Photo'}
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    onChange={(e) => {
+                                      const file = e.currentTarget.files?.[0];
+                                      e.currentTarget.value = '';
+                                      void handleUploadClueImage(idx, pIdx, file);
+                                    }}
+                                    className="hidden"
+                                  />
+                                </label>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Multiple-Choice Distractors (always shown for MC; optional fallback note otherwise) */}
+                    <div>
+                      <p className="text-[11px] text-[#4D6354] mb-1.5">
+                        {qType === 'multiple_choice'
+                          ? 'Answer Choices (include the Exact Answer + 3 distractors):'
+                          : 'Optional Multiple-Choice Distractors (auto-filled if blank so all 12 games work):'}
+                      </p>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {[0, 1, 2, 3].map((oIdx) => (
+                          <input
+                            key={oIdx}
+                            type="text"
+                            placeholder={`Choice ${oIdx + 1}`}
+                            value={q.options[oIdx] || ''}
+                            onChange={(e) => {
+                              const nextOpts = [...q.options];
+                              nextOpts[oIdx] = e.target.value;
+                              updateQuestion(idx, { options: nextOpts });
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg border border-[#D8D0BC] bg-white text-xs"
+                          />
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {builderFeedback && (
@@ -1505,19 +3118,51 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-              <button
-                type="button"
-                disabled={questions.length >= 50}
-                onClick={addBlankQuestion}
-                className="px-4 py-2.5 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                <Plus className="w-4 h-4" />
-                Add Question ({questions.length}/50)
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={questions.length >= 50}
+                  onClick={() => addBlankQuestion('identification')}
+                  className="px-3 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Identification
+                </button>
+                <button
+                  type="button"
+                  disabled={questions.length >= 50}
+                  onClick={() => addBlankQuestion('fill_in_blank')}
+                  className="px-3 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Fill Blank
+                </button>
+                <button
+                  type="button"
+                  disabled={questions.length >= 50}
+                  onClick={() => addBlankQuestion('enumeration')}
+                  className="px-3 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Enumeration
+                </button>
+                <button
+                  type="button"
+                  disabled={questions.length >= 50}
+                  onClick={() => addBlankQuestion('four_pics')}
+                  className="px-3 py-2 rounded-xl border border-[#EA7A26] text-[#C65B10] text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  4 Pics 1 Word
+                </button>
+                <span className="text-[11px] font-semibold text-[#4D6354] tabular-nums">
+                  ({questions.length}/50)
+                </span>
+              </div>
               <button
                 type="submit"
                 disabled={savingDeck}
-                className="px-6 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+                className="px-6 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
               >
                 {savingDeck
                   ? 'Saving...'
@@ -1865,7 +3510,10 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                       <p className="text-sm font-bold text-[#172A1E]">{userProf.displayName}</p>
                       <p className="text-xs text-[#4D6354] capitalize">
                         Role: <strong className="text-[#1E5B3A]">{userProf.role}</strong> · Section:{' '}
-                        {userProf.section || 'Unassigned'} · Pet: {userProf.petName}
+                        {userProf.section || 'Unassigned'}
+                        {userProf.role === 'student'
+                          ? ` · ID Status: ${userProf.approvalStatus || 'pending'}`
+                          : ''}
                       </p>
                     </div>
                     {userProf.uid === teacherProfile.uid ? (
@@ -1975,7 +3623,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                         Reset Scores, Alerts &amp; Pet Stats (Keep Accounts)
                       </p>
                       <p className="text-xs text-[#4D6354] mt-1">
-                        Clears all leaderboard scores and integrity strikes, and resets every user&apos;s coins (120), XP, and level back to Level 1 while keeping their login &amp; section.
+                        Clears all leaderboard scores and integrity strikes, and resets every user&apos;s coins ({STARTING_COINS}), starter snack, XP, and level back to Level 1 while keeping their login &amp; section.
                       </p>
                     </div>
                   </div>
@@ -2088,6 +3736,93 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               </div>
             </form>
           )}
+        </div>
+      )}
+
+      {/* Admin Full-Size School ID Card Inspector Modal */}
+      {isAdmin && inspectedApprovalItem && (
+        <div className="fixed inset-0 z-50 bg-black/55 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl border border-[#E5DEC9] max-w-xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-[#ECE7D8]">
+              <div>
+                <p className="text-xs font-bold text-[#EA7A26]">School ID Card Verification</p>
+                <h3 className="text-lg font-extrabold text-[#172A1E]">
+                  {inspectedApprovalItem.student.displayName}
+                </h3>
+                <p className="text-xs text-[#4D6354]">
+                  {inspectedApprovalItem.student.section || 'No section'} · ID #:{' '}
+                  <strong className="font-mono text-[#1E5B3A]">
+                    {inspectedApprovalItem.verification?.schoolIdNumber || 'N/A'}
+                  </strong>
+                  {inspectedApprovalItem.verification?.email
+                    ? ` · ${inspectedApprovalItem.verification.email}`
+                    : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setInspectingUid(null)}
+                className="p-1.5 rounded-xl hover:bg-[#FAF8F2] text-[#4D6354] cursor-pointer"
+                aria-label="Close School ID inspector"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {inspectedApprovalItem.verification?.idPhotoUrl ? (
+              <div className="rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] p-4 flex justify-center">
+                <img
+                  src={inspectedApprovalItem.verification.idPhotoUrl}
+                  alt={`${inspectedApprovalItem.student.displayName} School ID`}
+                  className="max-h-80 w-auto object-contain rounded-xl"
+                />
+              </div>
+            ) : (
+              <p className="text-xs text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
+                No School ID photo attached.
+              </p>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+              {inspectedApprovalItem.status !== 'rejected' && (
+                <button
+                  type="button"
+                  disabled={reviewBusyUid === inspectedApprovalItem.student.uid}
+                  onClick={() => {
+                    setRejectingUid(inspectedApprovalItem.student.uid);
+                    setRejectReasonInput(inspectedApprovalItem.note || '');
+                    setInspectingUid(null);
+                  }}
+                  className="px-4 py-2 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <XCircle className="w-4 h-4" />
+                  Decline / Not in School
+                </button>
+              )}
+              {inspectedApprovalItem.status !== 'approved' && (
+                <button
+                  type="button"
+                  disabled={reviewBusyUid === inspectedApprovalItem.student.uid || !onReviewStudentApproval}
+                  onClick={async () => {
+                    if (!onReviewStudentApproval) return;
+                    const targetUid = inspectedApprovalItem.student.uid;
+                    setReviewBusyUid(targetUid);
+                    try {
+                      await onReviewStudentApproval(targetUid, 'approved', '');
+                      soundFx.playCorrect();
+                      setInspectingUid(null);
+                    } finally {
+                      setReviewBusyUid(null);
+                    }
+                  }}
+                  className="px-5 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  <Check className="w-4 h-4" />
+                  Approve Student
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

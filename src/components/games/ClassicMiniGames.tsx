@@ -4,6 +4,11 @@ import { PublicProfile, QuizQuestion } from '../../types';
 import { GameSessionResult } from './SignatureGames';
 import { PetAvatar } from '../PetAvatar';
 import { soundFx } from '../../lib/sound';
+import {
+  checkEnumerationMatch,
+  getQuestionTypeLabel,
+  splitPromptBlank,
+} from '../../lib/questionUtils';
 
 interface ClassicGameProps {
   questions: QuizQuestion[];
@@ -396,6 +401,8 @@ export const MathDashGame: React.FC<ClassicGameProps> = ({ questions, profile, o
 export const QuizMasterGame: React.FC<ClassicGameProps> = ({ questions, profile, onComplete }) => {
   const [idx, setIdx] = useState(0);
   const [picked, setPicked] = useState<string | null>(null);
+  const [enumGuesses, setEnumGuesses] = useState<string[]>([]);
+  const [enumSubmitted, setEnumSubmitted] = useState<'idle' | 'correct' | 'wrong'>('idle');
   const [score, setScore] = useState(0);
   const [correctCount, setCorrectCount] = useState(0);
   const [startTime] = useState(() => Date.now());
@@ -409,11 +416,44 @@ export const QuizMasterGame: React.FC<ClassicGameProps> = ({ questions, profile,
   }, []);
 
   const q = questions[idx];
+  const isEnumeration = Boolean(
+    q?.questionType === 'enumeration' && q.enumerationItems && q.enumerationItems.length >= 2
+  );
+  const expectedEnumItems = useMemo(
+    () => (isEnumeration && q?.enumerationItems ? q.enumerationItems : []),
+    [isEnumeration, q?.enumerationItems]
+  );
   const displayOptions = useMemo(() => (q ? normalizeOptions(q) : []), [q]);
+
+  useEffect(() => {
+    setEnumGuesses(Array(expectedEnumItems.length).fill(''));
+    setEnumSubmitted('idle');
+  }, [idx, expectedEnumItems.length]);
 
   if (!q) {
     return <EmptyDeckNotice />;
   }
+
+  const promptParts = splitPromptBlank(q.prompt);
+
+  const advanceAfterAnswer = (nextScore: number, nextCorrect: number) => {
+    timeoutRef.current = window.setTimeout(() => {
+      if (idx + 1 >= questions.length) {
+        if (completedRef.current) return;
+        completedRef.current = true;
+        onComplete({
+          score: nextScore,
+          correctCount: nextCorrect,
+          totalCount: questions.length,
+          durationSeconds: Math.max(1, Math.round((Date.now() - startTime) / 1000)),
+        });
+      } else {
+        setIdx((i) => i + 1);
+        setPicked(null);
+        setEnumSubmitted('idle');
+      }
+    }, 900);
+  };
 
   const handleSelect = (opt: string) => {
     if (picked || completedRef.current) return;
@@ -430,68 +470,128 @@ export const QuizMasterGame: React.FC<ClassicGameProps> = ({ questions, profile,
       soundFx.playWrong();
     }
 
-    timeoutRef.current = window.setTimeout(() => {
-      if (idx + 1 >= questions.length) {
-        if (completedRef.current) return;
-        completedRef.current = true;
-        onComplete({
-          score: nextScore,
-          correctCount: nextCorrect,
-          totalCount: questions.length,
-          durationSeconds: Math.max(1, Math.round((Date.now() - startTime) / 1000)),
-        });
-      } else {
-        setIdx((i) => i + 1);
-        setPicked(null);
-      }
-    }, 850);
+    advanceAfterAnswer(nextScore, nextCorrect);
+  };
+
+  const handleEnumSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (enumSubmitted !== 'idle' || completedRef.current) return;
+    if (enumGuesses.some((g) => !g.trim())) return;
+    const isRight = checkEnumerationMatch(enumGuesses, expectedEnumItems);
+    const nextScore = isRight ? score + 40 : score;
+    const nextCorrect = isRight ? correctCount + 1 : correctCount;
+    setEnumSubmitted(isRight ? 'correct' : 'wrong');
+
+    if (isRight) {
+      soundFx.playCorrect();
+      setScore(nextScore);
+      setCorrectCount(nextCorrect);
+    } else {
+      soundFx.playWrong();
+    }
+
+    advanceAfterAnswer(nextScore, nextCorrect);
   };
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between text-xs font-semibold text-[#4D6354] tabular-nums">
-        <span>Quiz Master · {idx + 1}/{questions.length}</span>
+        <span>
+          Quiz Master · {getQuestionTypeLabel(q)} · {idx + 1}/{questions.length}
+        </span>
         <span className="text-[#1E5B3A]">Score: {score}</span>
       </div>
       <div className="bg-[#FAF8F2] rounded-2xl border border-[#E5DEC9] p-6">
-        <h3 className="text-lg font-bold text-[#172A1E]">{q.prompt}</h3>
-      </div>
-      <div className="space-y-2.5">
-        {displayOptions.map((opt, i) => {
-          const isRight = opt.trim().toUpperCase() === q.answer.trim().toUpperCase();
-          const isMine = picked === opt;
-          return (
-            <button
-              key={`${opt}_${i}`}
-              type="button"
-              disabled={Boolean(picked)}
-              onClick={() => handleSelect(opt)}
-              className={`w-full p-4 rounded-xl border text-left text-sm font-semibold transition-colors cursor-pointer flex items-center gap-3 ${
-                picked
-                  ? isRight
-                    ? 'bg-[#1E5B3A] text-white border-[#1E5B3A]'
-                    : isMine
-                    ? 'bg-red-50 text-red-700 border-red-300'
-                    : 'bg-white text-[#94A398] border-[#E5DEC9]'
-                  : 'bg-white border-[#E5DEC9] hover:border-[#1E5B3A] text-[#172A1E]'
-              }`}
-            >
-              <span className="w-7 h-7 rounded-lg bg-[#FAF8F2] text-[#172A1E] text-xs font-bold flex items-center justify-center shrink-0">
-                {String.fromCharCode(65 + i)}
+        <h3 className="text-lg font-bold text-[#172A1E] leading-snug">
+          {promptParts.hasBlank ? (
+            <>
+              {promptParts.before}
+              <span className="inline-block min-w-[76px] mx-1 px-2 py-0.5 rounded-lg bg-white border-b-2 border-[#EA7A26] text-[#C65B10] font-extrabold text-center">
+                {picked || '_____'}
               </span>
-              <span>{opt}</span>
-            </button>
-          );
-        })}
+              {promptParts.after}
+            </>
+          ) : (
+            q.prompt
+          )}
+        </h3>
+        {q.hint && (
+          <p className="text-xs text-[#4D6354] mt-2">Hint: {q.hint}</p>
+        )}
       </div>
+
+      {isEnumeration ? (
+        <form onSubmit={handleEnumSubmit} className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {expectedEnumItems.map((_, i) => (
+              <input
+                key={i}
+                type="text"
+                disabled={enumSubmitted !== 'idle'}
+                value={enumGuesses[i] || ''}
+                onChange={(e) => {
+                  const next = [...enumGuesses];
+                  next[i] = e.target.value;
+                  setEnumGuesses(next);
+                }}
+                placeholder={`Answer Item #${i + 1}`}
+                className="px-3.5 py-2.5 rounded-xl border-2 border-[#D8D0BC] bg-white text-sm font-semibold focus:border-[#1E5B3A] focus:outline-none disabled:opacity-60"
+              />
+            ))}
+          </div>
+          <button
+            type="submit"
+            disabled={enumSubmitted !== 'idle' || enumGuesses.some((g) => !g.trim())}
+            className="px-5 py-2.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+          >
+            Submit Enumeration
+          </button>
+        </form>
+      ) : (
+        <div className="space-y-2.5">
+          {displayOptions.map((opt, i) => {
+            const isRight = opt.trim().toUpperCase() === q.answer.trim().toUpperCase();
+            const isMine = picked === opt;
+            return (
+              <button
+                key={`${opt}_${i}`}
+                type="button"
+                disabled={Boolean(picked)}
+                onClick={() => handleSelect(opt)}
+                className={`w-full p-4 rounded-xl border text-left text-sm font-semibold transition-colors cursor-pointer flex items-center gap-3 ${
+                  picked
+                    ? isRight
+                      ? 'bg-[#1E5B3A] text-white border-[#1E5B3A]'
+                      : isMine
+                      ? 'bg-red-50 text-red-700 border-red-300'
+                      : 'bg-white text-[#94A398] border-[#E5DEC9]'
+                    : 'bg-white border-[#E5DEC9] hover:border-[#1E5B3A] text-[#172A1E]'
+                }`}
+              >
+                <span className="w-7 h-7 rounded-lg bg-[#FAF8F2] text-[#172A1E] text-xs font-bold flex items-center justify-center shrink-0">
+                  {String.fromCharCode(65 + i)}
+                </span>
+                <span>{opt}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="flex items-center gap-3 text-xs text-[#4D6354]">
         <PetAvatar species={profile.petSpecies} color={profile.petColor} outfit={profile.outfit} accessory={profile.accessory} size={48} />
         <span>
-          {picked
-            ? picked.trim().toUpperCase() === q.answer.trim().toUpperCase()
-              ? 'Great choice!'
-              : `Correct answer: ${q.answer}`
-            : 'Pick the best answer.'}
+          {isEnumeration
+            ? enumSubmitted === 'correct'
+              ? 'All items matched!'
+              : enumSubmitted === 'wrong'
+                ? `Expected items: ${expectedEnumItems.join(', ')}`
+                : `Enter all ${expectedEnumItems.length} answers in any order.`
+            : picked
+              ? picked.trim().toUpperCase() === q.answer.trim().toUpperCase()
+                ? 'Great choice!'
+                : `Correct answer: ${q.answer}`
+              : 'Pick the best answer.'}
         </span>
       </div>
     </div>

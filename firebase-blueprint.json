@@ -18,6 +18,7 @@
         "petColor": { "type": "string", "maxLength": 30 },
         "uniformStyle": { "type": "string", "maxLength": 40 },
         "unlockedItems": { "type": "array", "description": "Bounded list of unlocked cosmetic/furniture item IDs (max 40)." },
+        "foodInventory": { "type": "object", "description": "Optional bounded map of purchased food item IDs to consumable quantities (max 16 items)." },
         "hunger": { "type": "integer" },
         "happiness": { "type": "integer" },
         "energy": { "type": "integer" },
@@ -34,6 +35,8 @@
         "photoUrl": { "type": "string", "maxLength": 40000, "description": "Optional compressed student/faculty profile photo data URL or Google avatar URL." },
         "isOnline": { "type": "boolean", "description": "Live session online flag updated on login, heartbeat, and sign out." },
         "lastSeenAt": { "type": "string", "format": "date-time", "description": "Server timestamp of the user's most recent active classroom heartbeat." },
+        "approvalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"], "description": "Admin approval state required for students after School ID verification." },
+        "approvalNote": { "type": "string", "maxLength": 140, "description": "Optional Admin review note when approving or declining a student School ID." },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -92,7 +95,7 @@
         "sourceType": { "type": "string", "enum": ["custom", "pptx"] },
         "teacherId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "teacherName": { "type": "string", "minLength": 1, "maxLength": 60 },
-        "questions": { "type": "array", "description": "Bounded array of up to 50 question objects." },
+        "questions": { "type": "array", "description": "Bounded array of up to 50 question objects supporting questionType (multiple_choice, identification, fill_in_blank, enumeration, four_pics), enumerationItems, and cluePanels." },
         "isPublished": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -219,6 +222,115 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "targetRole", "accessCode", "createdAt", "updatedAt"]
+    },
+    "ClassroomSession": {
+      "title": "ClassroomSession",
+      "description": "Real-time live quiz session broadcast by a teacher to organize and route students in their classroom section.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "section": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "teacherId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teacherName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "gameId": {
+          "type": "string",
+          "enum": [
+            "lorenscape",
+            "on_the_run",
+            "brainzone",
+            "grab_it",
+            "catch_the_duck",
+            "word_quest",
+            "math_dash",
+            "quiz_master",
+            "memory_match",
+            "sorting_squad",
+            "quick_recall",
+            "four_pics_one_word"
+          ]
+        },
+        "gameTitle": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "deckId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "deckTitle": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "status": { "type": "string", "enum": ["active", "ended"] },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "section",
+        "teacherId",
+        "teacherName",
+        "gameId",
+        "gameTitle",
+        "deckId",
+        "deckTitle",
+        "subject",
+        "status",
+        "startedAt",
+        "updatedAt"
+      ]
+    },
+    "SchoolIdVerification": {
+      "title": "SchoolIdVerification",
+      "description": "Private student School ID submission (ID number and card photo) reviewed by Admin to prevent non-school outsiders from entering.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "section": { "type": "string", "maxLength": 40 },
+        "schoolIdNumber": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "idPhotoUrl": { "type": "string", "minLength": 1, "maxLength": 150000, "description": "Compressed base64 JPEG/PNG/WebP photo of the student's official school ID card." },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "reviewedBy": { "type": "string", "maxLength": 60 },
+        "reviewNote": { "type": "string", "maxLength": 140 },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "studentName",
+        "email",
+        "section",
+        "schoolIdNumber",
+        "idPhotoUrl",
+        "status",
+        "reviewedBy",
+        "reviewNote",
+        "submittedAt",
+        "updatedAt"
+      ]
+    },
+    "SectionChangeRequest": {
+      "title": "SectionChangeRequest",
+      "description": "Student request to fix a misspelled Grade & Section, reviewed and approved exclusively by an Administrator.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "currentSection": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "requestedSection": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "reviewedBy": { "type": "string", "maxLength": 60 },
+        "reviewNote": { "type": "string", "maxLength": 140 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "studentName",
+        "currentSection",
+        "requestedSection",
+        "reason",
+        "status",
+        "reviewedBy",
+        "reviewNote",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -253,6 +365,18 @@
     "/roleClaims/{userId}": {
       "schema": { "$ref": "#/entities/RoleClaim" },
       "description": "User-submitted secret code verification record checked by Firestore rules."
+    },
+    "/classroomSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ClassroomSession" },
+      "description": "Per-classroom live quiz session launched by a teacher so enrolled students jump directly into the selected quiz."
+    },
+    "/schoolIdVerifications/{userId}": {
+      "schema": { "$ref": "#/entities/SchoolIdVerification" },
+      "description": "Private student School ID submissions reviewed and approved exclusively by Administrators."
+    },
+    "/sectionChangeRequests/{userId}": {
+      "schema": { "$ref": "#/entities/SectionChangeRequest" },
+      "description": "Student spelling-correction requests for permanent Grade & Section fields, approved exclusively by Administrators."
     }
   }
 }
