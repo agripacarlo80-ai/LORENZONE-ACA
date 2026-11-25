@@ -85,6 +85,8 @@ export interface PublicProfile {
   correctAnswers: number;
   totalAnswers: number;
   isSleeping: boolean;
+  sleepTickAt?: unknown;
+  roomBackground?: string;
   lockedOut: boolean;
   lockReason: string;
   activeGame: string;
@@ -200,7 +202,7 @@ export interface GameMetadata {
   rewardCoins: number;
 }
 
-export type ShopCategory = 'food' | 'clothes' | 'accessories' | 'furniture';
+export type ShopCategory = 'food' | 'clothes' | 'accessories' | 'furniture' | 'backgrounds';
 
 export interface ShopItem {
   id: string;
@@ -210,6 +212,7 @@ export interface ShopItem {
   requiredLevel: number;
   description: string;
   previewColor: string;
+  backgroundUrl?: string;
   hungerBoost?: number;
   happinessBoost?: number;
   energyBoost?: number;
@@ -217,6 +220,22 @@ export interface ShopItem {
   xpBoost?: number;
   isDrink?: boolean;
   isMedicine?: boolean;
+}
+
+export type AttendanceStatus = 'present' | 'late' | 'absent' | 'excused';
+
+export interface AttendanceRecord {
+  id: string;
+  date: string;
+  studentId: string;
+  studentName: string;
+  section: string;
+  status: AttendanceStatus;
+  source: 'auto' | 'teacher';
+  markedBy: string;
+  note: string;
+  checkInAt: unknown;
+  updatedAt: unknown;
 }
 
 export interface ClassroomSession {

@@ -58,6 +58,11 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
         className="absolute inset-0 w-full h-full object-cover opacity-30"
       />
       <div className="relative z-10 max-w-md w-full bg-[#FAF8F2] rounded-3xl border-2 border-[#E5DEC9] p-8 shadow-xl text-center">
+        <img
+          src="/assets/aistudio/fd5c8fff-13fe-46ee-baba-021f77749eb4_5f87432b.jpg"
+          alt="San Lorenzo Academy Logo"
+          className="w-16 h-16 mx-auto rounded-full object-cover border-2 border-[#EA7A26]/70 bg-white shadow-sm mb-3"
+        />
         <p className="text-xs font-semibold tracking-wider text-[#1E5B3A] mb-3">
           SAN LORENZO ACADEMY, INC.
         </p>
@@ -116,13 +121,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             className="absolute inset-0 w-full h-full object-cover opacity-35"
           />
           <div className="relative z-10">
-            <span className="text-xs font-semibold tracking-wide text-amber-200">
-              San Lorenzo Academy, Inc.
-            </span>
-            <h1 className="text-4xl font-extrabold mt-2 tracking-tight text-balance">
-              LORENZONE
-            </h1>
-            <p className="text-sm text-emerald-50 mt-2 max-w-sm leading-relaxed">
+            <div className="flex items-center gap-3.5">
+              <img
+                src="/assets/aistudio/fd5c8fff-13fe-46ee-baba-021f77749eb4_5f87432b.jpg"
+                alt="San Lorenzo Academy Logo"
+                className="w-16 h-16 rounded-full object-cover border-2 border-amber-200/90 bg-white shadow-md shrink-0"
+              />
+              <div>
+                <span className="text-xs font-semibold tracking-wide text-amber-200">
+                  San Lorenzo Academy, Inc.
+                </span>
+                <h1 className="text-4xl font-extrabold mt-0.5 tracking-tight text-balance">
+                  LORENZONE
+                </h1>
+              </div>
+            </div>
+            <p className="text-sm text-emerald-50 mt-4 max-w-sm leading-relaxed">
               Care for your SLA pet companion, compete across 12 customizable quiz games, and track classroom mastery in real time.
             </p>
           </div>
@@ -366,15 +380,22 @@ export const OnboardingStudio: React.FC<OnboardingProps> = ({
         className="max-w-4xl w-full bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-10 shadow-sm"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#ECE7D8]">
-          <div>
-            <p className="text-xs font-semibold text-[#EA7A26]">San Lorenzo Academy Onboarding</p>
-            <h2 className="text-2xl font-bold text-[#172A1E]">
-              {role === 'admin'
-                ? 'Administrator Console Setup'
-                : role === 'teacher'
-                  ? 'Faculty Profile Setup'
-                  : 'Student Verification & Pet Companion'}
-            </h2>
+          <div className="flex items-center gap-3">
+            <img
+              src="/assets/aistudio/fd5c8fff-13fe-46ee-baba-021f77749eb4_5f87432b.jpg"
+              alt="San Lorenzo Academy Logo"
+              className="w-12 h-12 rounded-full object-cover border border-[#E5DEC9] bg-white shrink-0"
+            />
+            <div>
+              <p className="text-xs font-semibold text-[#EA7A26]">San Lorenzo Academy Onboarding</p>
+              <h2 className="text-2xl font-bold text-[#172A1E]">
+                {role === 'admin'
+                  ? 'Administrator Console Setup'
+                  : role === 'teacher'
+                    ? 'Faculty Profile Setup'
+                    : 'Student Verification & Pet Companion'}
+              </h2>
+            </div>
           </div>
           <span className="text-xs text-[#4D6354]">{email}</span>
         </div>
@@ -1053,13 +1074,20 @@ export const PendingApprovalScreen: React.FC<PendingApprovalScreenProps> = ({
     <div className="min-h-screen bg-[#FAF8F2] py-10 px-4 sm:px-8 flex items-center justify-center">
       <div className="max-w-2xl w-full bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 shadow-sm space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-[#ECE7D8]">
-          <div>
-            <p className="text-xs font-semibold text-[#EA7A26]">
-              San Lorenzo Academy · Campus Security Gate
-            </p>
-            <h1 className="text-2xl font-extrabold text-[#172A1E] mt-0.5">
-              LOREN<span className="text-[#EA7A26]">ZONE</span> Student Verification
-            </h1>
+          <div className="flex items-center gap-3">
+            <img
+              src="/assets/aistudio/fd5c8fff-13fe-46ee-baba-021f77749eb4_5f87432b.jpg"
+              alt="San Lorenzo Academy Logo"
+              className="w-12 h-12 rounded-full object-cover border border-[#E5DEC9] bg-white shrink-0"
+            />
+            <div>
+              <p className="text-xs font-semibold text-[#EA7A26]">
+                San Lorenzo Academy · Campus Security Gate
+              </p>
+              <h1 className="text-2xl font-extrabold text-[#172A1E] mt-0.5">
+                LOREN<span className="text-[#EA7A26]">ZONE</span> Student Verification
+              </h1>
+            </div>
           </div>
           <button
             type="button"

@@ -126,6 +126,51 @@
   }
 }
 
+@keyframes ambientDriftDown {
+  0% {
+    transform: translateY(-16px) translateX(0px) rotate(0deg);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.85;
+  }
+  85% {
+    opacity: 0.75;
+  }
+  100% {
+    transform: translateY(380px) translateX(32px) rotate(140deg);
+    opacity: 0;
+  }
+}
+
+@keyframes ambientBubbleUp {
+  0% {
+    transform: translateY(20px) translateX(0px) scale(0.8);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.7;
+  }
+  80% {
+    opacity: 0.65;
+  }
+  100% {
+    transform: translateY(-340px) translateX(-16px) scale(1.15);
+    opacity: 0;
+  }
+}
+
+@keyframes ambientTwinkle {
+  0%, 100% {
+    transform: scale(0.85);
+    opacity: 0.25;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0.95;
+  }
+}
+
 .animate-float-gentle {
   animation: floatGentle 3.2s ease-in-out infinite;
 }
@@ -146,12 +191,27 @@
   animation: floatFeedback 1100ms ease-out forwards;
 }
 
+.animate-ambient-petal {
+  animation: ambientDriftDown 8s linear infinite;
+}
+
+.animate-ambient-bubble {
+  animation: ambientBubbleUp 7s ease-in infinite;
+}
+
+.animate-ambient-twinkle {
+  animation: ambientTwinkle 2.8s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-float-gentle,
   .animate-duck-swim,
   .animate-runner-hop,
   .animate-pet-bounce,
-  .animate-float-feedback {
+  .animate-float-feedback,
+  .animate-ambient-petal,
+  .animate-ambient-bubble,
+  .animate-ambient-twinkle {
     animation: none;
   }
 }

@@ -50,6 +50,9 @@ export const PetAvatar: React.FC<PetAvatarProps> = ({
     outfit_grad_toga: { main: '#1E5B3A', trim: '#FACC15', collar: '#FACC15' },
     outfit_scholar_cape: { main: '#0F4C2B', trim: '#FACC15', collar: '#FACC15' },
     outfit_cyber_suit: { main: '#1E293B', trim: '#10B981', collar: '#10B981' },
+    outfit_arcade_hoodie: { main: '#7C3AED', trim: '#38BDF8', collar: '#F472B6' },
+    outfit_astronaut: { main: '#F8FAFC', trim: '#EA7A26', collar: '#38BDF8' },
+    outfit_wizard_robe: { main: '#3730A3', trim: '#FACC15', collar: '#FACC15' },
     none: { main: color, trim: color, collar: color },
   };
 
@@ -192,6 +195,27 @@ export const PetAvatar: React.FC<PetAvatarProps> = ({
               <line x1="100" y1="126" x2="115" y2="126" stroke="#10B981" strokeWidth="2.5" strokeLinecap="round" />
               <circle cx="90" cy="137" r="7" fill="#0F172A" stroke="#10B981" strokeWidth="2.4" />
               <circle cx="90" cy="137" r="3" fill="#34D399" />
+            </g>
+          ) : outfit === 'outfit_arcade_hoodie' ? (
+            <g>
+              <path d="M72 106 L90 119 L108 106" fill="#4C1D95" stroke={stroke} strokeWidth="2.2" />
+              <rect x="78" y="124" width="24" height="16" rx="3" fill="#2E1065" stroke="#38BDF8" strokeWidth="2" />
+              <circle cx="86" cy="132" r="2.2" fill="#F472B6" />
+              <circle cx="94" cy="132" r="2.2" fill="#F472B6" />
+            </g>
+          ) : outfit === 'outfit_astronaut' ? (
+            <g>
+              <path d="M72 106 L90 116 L108 106" fill="#38BDF8" stroke={stroke} strokeWidth="2.2" />
+              <rect x="54" y="142" width="72" height="7" fill="#EA7A26" />
+              <rect x="78" y="120" width="24" height="14" rx="2.5" fill="#E0F2FE" stroke="#0284C7" strokeWidth="2" />
+              <circle cx="107" cy="128" r="4.5" fill="#38BDF8" stroke={stroke} strokeWidth="1.5" />
+            </g>
+          ) : outfit === 'outfit_wizard_robe' ? (
+            <g>
+              <path d="M72 106 L90 120 L108 106" fill="#FACC15" stroke={stroke} strokeWidth="2.2" />
+              <path d="M90 128 L93 135 L100 135 L94 139 L96 146 L90 142 L84 146 L86 139 L80 135 L87 135 Z" fill="#FACC15" />
+              <circle cx="71" cy="144" r="2.2" fill="#FEF08A" />
+              <circle cx="109" cy="144" r="2.2" fill="#FEF08A" />
             </g>
           ) : outfit === 'outfit_scholar_cape' ? (
             <g>
@@ -435,6 +459,34 @@ export const PetAvatar: React.FC<PetAvatarProps> = ({
           <path d="M56 36 L90 23 L124 36 L90 47 Z" fill="#1E5B3A" stroke={stroke} strokeWidth="2.4" strokeLinejoin="round" />
           <line x1="118" y1="36" x2="122" y2="54" stroke="#FACC15" strokeWidth="2.8" strokeLinecap="round" />
           <circle cx="122" cy="55" r="3" fill="#FACC15" />
+        </g>
+      )}
+
+      {accessory === 'acc_party_shades' && (
+        <g>
+          <rect x="58" y="65" width="26" height="16" rx="2" fill="#1E1B4B" stroke="#A855F7" strokeWidth="2.5" />
+          <rect x="96" y="65" width="26" height="16" rx="2" fill="#1E1B4B" stroke="#A855F7" strokeWidth="2.5" />
+          <line x1="84" y1="71" x2="96" y2="71" stroke="#A855F7" strokeWidth="2.8" />
+          <rect x="64" y="69" width="4" height="4" fill="#38BDF8" />
+          <rect x="70" y="73" width="4" height="4" fill="#38BDF8" />
+          <rect x="102" y="69" width="4" height="4" fill="#38BDF8" />
+          <rect x="108" y="73" width="4" height="4" fill="#38BDF8" />
+        </g>
+      )}
+
+      {accessory === 'acc_astro_helmet' && (
+        <g>
+          <circle cx="90" cy="74" r="47" fill="#E0F2FE" fillOpacity="0.22" stroke="#38BDF8" strokeWidth="3.2" />
+          <path d="M56 54 Q70 40 94 42" stroke="#FFFFFF" strokeWidth="2.5" strokeLinecap="round" opacity="0.7" fill="none" />
+        </g>
+      )}
+
+      {accessory === 'acc_wizard_hat' && (
+        <g>
+          <ellipse cx="90" cy="46" rx="36" ry="9" fill="#312E81" stroke={stroke} strokeWidth="2.6" />
+          <path d="M64 44 L89 6 L109 18 L102 28 L116 44 Z" fill="#4338CA" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+          <path d="M67 41 Q90 46 113 41" stroke="#FACC15" strokeWidth="4" fill="none" />
+          <circle cx="90" cy="28" r="3.2" fill="#FACC15" />
         </g>
       )}
 

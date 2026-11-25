@@ -17,8 +17,8 @@
         "accessory": { "type": "string", "maxLength": 40 },
         "petColor": { "type": "string", "maxLength": 30 },
         "uniformStyle": { "type": "string", "maxLength": 40 },
-        "unlockedItems": { "type": "array", "description": "Bounded list of unlocked cosmetic/furniture item IDs (max 40)." },
-        "foodInventory": { "type": "object", "description": "Optional bounded map of purchased food item IDs to consumable quantities (max 16 items)." },
+        "unlockedItems": { "type": "array", "description": "Bounded list of unlocked cosmetic/furniture/background item IDs (max 100)." },
+        "foodInventory": { "type": "object", "description": "Optional bounded map of purchased food item IDs to consumable quantities (max 32 items)." },
         "hunger": { "type": "integer" },
         "happiness": { "type": "integer" },
         "energy": { "type": "integer" },
@@ -28,6 +28,8 @@
         "correctAnswers": { "type": "integer" },
         "totalAnswers": { "type": "integer" },
         "isSleeping": { "type": "boolean" },
+        "sleepTickAt": { "type": "string", "format": "date-time", "description": "Timestamp of the most recent sleep start or 2-minute +5% energy tick." },
+        "roomBackground": { "type": "string", "maxLength": 40, "description": "Active Pet Home Room background theme ID." },
         "lockedOut": { "type": "boolean" },
         "lockReason": { "type": "string", "maxLength": 140 },
         "activeGame": { "type": "string", "maxLength": 60 },
@@ -331,6 +333,37 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily class attendance record per student with auto check-in and teacher/admin status updates.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "studentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "section": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["present", "late", "absent", "excused"] },
+        "source": { "type": "string", "enum": ["auto", "teacher"] },
+        "markedBy": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "note": { "type": "string", "maxLength": 140 },
+        "checkInAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "date",
+        "studentId",
+        "studentName",
+        "section",
+        "status",
+        "source",
+        "markedBy",
+        "note",
+        "checkInAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -377,6 +410,10 @@
     "/sectionChangeRequests/{userId}": {
       "schema": { "$ref": "#/entities/SectionChangeRequest" },
       "description": "Student spelling-correction requests for permanent Grade & Section fields, approved exclusively by Administrators."
+    },
+    "/attendanceRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Daily class attendance records tracking Present, Late, Excused, and Absent statuses for every student in each section."
     }
   }
 }

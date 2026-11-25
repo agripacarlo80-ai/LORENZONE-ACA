@@ -282,3 +282,49 @@ export function downloadLeaderboardCsv(profiles: PublicProfile[], records: Score
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+export function downloadAttendanceCsv(
+  attendanceRows: Array<{
+    studentName: string;
+    section: string;
+    status: string;
+    presence: string;
+    checkInTime: string;
+    markedBy: string;
+    note: string;
+  }>,
+  dateStr: string,
+  roomLabel: string
+): void {
+  const rows: string[][] = [
+    ['Date', 'Classroom', 'Student Name', 'Attendance Status', 'App Presence', 'Check-In / Updated', 'Marked By', 'Note'],
+  ];
+
+  attendanceRows.forEach((row) => {
+    rows.push([
+      dateStr,
+      row.section || roomLabel,
+      row.studentName,
+      row.status,
+      row.presence,
+      row.checkInTime,
+      row.markedBy,
+      row.note,
+    ]);
+  });
+
+  const csvContent = rows
+    .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  const safeSlug = roomLabel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'class';
+  link.setAttribute('download', `lorenzone-attendance-${safeSlug}-${dateStr}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}

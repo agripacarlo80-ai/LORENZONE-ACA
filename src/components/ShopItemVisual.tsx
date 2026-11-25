@@ -215,6 +215,83 @@ export const ShopItemVisual: React.FC<ShopItemVisualProps> = ({
           </g>
         );
 
+      case 'food_turon':
+        return (
+          <g>
+            <ellipse cx="40" cy="57" rx="22" ry="5.5" fill="#172A1E" fillOpacity="0.1" />
+            <rect x="17" y="34" width="42" height="16" rx="7" transform="rotate(-14 38 42)" fill="#D97706" stroke={stroke} strokeWidth="2.6" />
+            <rect x="22" y="25" width="40" height="15" rx="7" transform="rotate(8 42 32)" fill="#F59E0B" stroke={stroke} strokeWidth="2.6" />
+            <path d="M25 32 Q42 36 56 30" stroke="#92400E" strokeWidth="2.2" strokeLinecap="round" fill="none" />
+            <circle cx="33" cy="29" r="1.6" fill="#FEF08A" />
+            <circle cx="47" cy="34" r="1.6" fill="#FEF08A" />
+          </g>
+        );
+
+      case 'food_boba_tea':
+        return (
+          <g>
+            <path d="M47 10 L54 10 L46 27" stroke="#2C2A24" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+            <path d="M25 26 L55 26 L50 61 C49 63 31 63 30 61 Z" fill="#E7C9A9" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <path d="M27 36 Q40 42 53 36 L51 54 Q40 58 29 54 Z" fill="#C68B59" />
+            <rect x="22" y="22" width="36" height="5" rx="2.5" fill="#FFFFFF" stroke={stroke} strokeWidth="2.2" />
+            <circle cx="34" cy="56" r="2.8" fill="#451A03" />
+            <circle cx="40" cy="57" r="2.8" fill="#451A03" />
+            <circle cx="46" cy="55" r="2.8" fill="#451A03" />
+            <circle cx="37" cy="51" r="2.5" fill="#451A03" />
+            <circle cx="44" cy="50" r="2.5" fill="#451A03" />
+          </g>
+        );
+
+      case 'food_sisig_rice':
+        return (
+          <g>
+            <ellipse cx="40" cy="48" rx="26" ry="14" fill="#1F2937" stroke={stroke} strokeWidth="2.6" />
+            <ellipse cx="40" cy="46" rx="21" ry="10" fill="#92400E" />
+            <circle cx="33" cy="44" r="6" fill="#FFFDF8" stroke="#E5E7EB" strokeWidth="1.2" />
+            <circle cx="33" cy="44" r="2.8" fill="#FACC15" />
+            <circle cx="46" cy="45" r="4.5" fill="#D97706" />
+            <circle cx="43" cy="39" r="3" fill="#22C55E" />
+            <circle cx="51" cy="41" r="2.5" fill="#EF4444" />
+          </g>
+        );
+
+      case 'food_ube_cake':
+        return (
+          <g>
+            <ellipse cx="40" cy="58" rx="24" ry="6" fill="#FFFFFF" stroke={stroke} strokeWidth="2.2" />
+            <path d="M20 48 L60 48 L54 27 L24 35 Z" fill="#9333EA" stroke={stroke} strokeWidth="2.5" strokeLinejoin="round" />
+            <path d="M24 35 L54 27 L52 22 L24 30 Z" fill="#FACC15" stroke={stroke} strokeWidth="2" strokeLinejoin="round" />
+            <line x1="22" y1="42" x2="57" y2="39" stroke="#F3E8FF" strokeWidth="2.4" />
+            <circle cx="40" cy="23" r="3.5" fill="#C084FC" stroke={stroke} strokeWidth="1.4" />
+          </g>
+        );
+
+      case 'food_ramen_bowl':
+        return (
+          <g>
+            <path d="M16 38 L64 38 C62 56 52 62 40 62 C28 62 18 56 16 38 Z" fill="#DC2626" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <ellipse cx="40" cy="38" rx="24" ry="7" fill="#FDE68A" stroke={stroke} strokeWidth="2.2" />
+            <path d="M26 38 Q33 32 40 38 Q47 32 54 38" stroke="#F59E0B" strokeWidth="2.4" fill="none" />
+            <circle cx="32" cy="36" r="4.5" fill="#FFFFFF" stroke={stroke} strokeWidth="1.4" />
+            <circle cx="32" cy="36" r="2.2" fill="#F59E0B" />
+            <rect x="46" y="30" width="9" height="8" rx="1.5" fill="#1F2937" />
+            <line x1="48" y1="16" x2="58" y2="30" stroke="#78350F" strokeWidth="2.8" strokeLinecap="round" />
+            <line x1="53" y1="15" x2="62" y2="29" stroke="#78350F" strokeWidth="2.8" strokeLinecap="round" />
+          </g>
+        );
+
+      case 'food_galaxy_sundae':
+        return (
+          <g>
+            <path d="M25 36 L55 36 L48 59 L32 59 Z" fill="#312E81" stroke={stroke} strokeWidth="2.5" strokeLinejoin="round" />
+            <ellipse cx="40" cy="62" rx="13" ry="3.5" fill="#E0E7FF" stroke={stroke} strokeWidth="2" />
+            <circle cx="34" cy="31" r="8" fill="#818CF8" stroke={stroke} strokeWidth="2.2" />
+            <circle cx="46" cy="31" r="8" fill="#C084FC" stroke={stroke} strokeWidth="2.2" />
+            <circle cx="40" cy="24" r="8.5" fill="#38BDF8" stroke={stroke} strokeWidth="2.2" />
+            <path d="M40 12 L42 16 L46 16 L43 18.5 L44 22 L40 20 L36 22 L37 18.5 L34 16 L38 16 Z" fill="#FACC15" stroke={stroke} strokeWidth="1.2" />
+          </g>
+        );
+
       case 'tool_soap':
         return (
           <g>
@@ -370,6 +447,36 @@ export const ShopItemVisual: React.FC<ShopItemVisualProps> = ({
           </g>
         );
 
+      case 'outfit_arcade_hoodie':
+        return (
+          <g>
+            <path d="M28 18 C32 12 48 12 52 18 L64 34 L56 42 L53 35 L53 62 L27 62 L27 35 L24 42 L16 34 Z" fill="#7C3AED" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <ellipse cx="40" cy="21" rx="9" ry="5" fill="#4C1D95" stroke={stroke} strokeWidth="2" />
+            <rect x="34" y="34" width="12" height="10" rx="2" fill="#2E1065" stroke="#38BDF8" strokeWidth="1.6" />
+            <circle cx="38" cy="39" r="1.8" fill="#F472B6" />
+            <circle cx="42" cy="39" r="1.8" fill="#F472B6" />
+          </g>
+        );
+
+      case 'outfit_astronaut':
+        return (
+          <g>
+            <path d="M23 21 L33 18 L40 25 L47 18 L57 21 L65 37 L57 42 L54 35 L54 61 L26 61 L26 35 L23 42 L15 37 Z" fill="#F8FAFC" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <rect x="26" y="45" width="28" height="6" fill="#EA7A26" />
+            <rect x="33" y="29" width="14" height="11" rx="2" fill="#E0F2FE" stroke="#0284C7" strokeWidth="1.8" />
+            <circle cx="49" cy="33" r="3" fill="#38BDF8" />
+          </g>
+        );
+
+      case 'outfit_wizard_robe':
+        return (
+          <g>
+            <path d="M23 21 L33 18 L40 26 L47 18 L57 21 L66 40 L57 44 L54 35 L56 62 L24 62 L26 35 L23 44 L14 40 Z" fill="#3730A3" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <path d="M32 18 L40 29 L48 18" fill="#FACC15" stroke={stroke} strokeWidth="1.8" />
+            <path d="M40 36 L42.5 41 L48 41 L43.5 44.5 L45 50 L40 46.5 L35 50 L36.5 44.5 L32 41 L37.5 41 Z" fill="#FACC15" />
+          </g>
+        );
+
       // --- ACCESSORIES ---
       case 'acc_orange_bandana':
         return (
@@ -511,6 +618,38 @@ export const ShopItemVisual: React.FC<ShopItemVisualProps> = ({
           </g>
         );
 
+      case 'acc_party_shades':
+        return (
+          <g>
+            <rect x="13" y="31" width="23" height="15" rx="2" fill="#1E1B4B" stroke="#A855F7" strokeWidth="2.6" />
+            <rect x="44" y="31" width="23" height="15" rx="2" fill="#1E1B4B" stroke="#A855F7" strokeWidth="2.6" />
+            <line x1="36" y1="36" x2="44" y2="36" stroke="#A855F7" strokeWidth="3" />
+            <rect x="18" y="35" width="4" height="4" fill="#38BDF8" />
+            <rect x="23" y="39" width="4" height="4" fill="#38BDF8" />
+            <rect x="49" y="35" width="4" height="4" fill="#38BDF8" />
+            <rect x="54" y="39" width="4" height="4" fill="#38BDF8" />
+          </g>
+        );
+
+      case 'acc_astro_helmet':
+        return (
+          <g>
+            <circle cx="40" cy="42" r="24" fill="#E0F2FE" fillOpacity="0.6" stroke={stroke} strokeWidth="2.8" />
+            <ellipse cx="40" cy="42" rx="17" ry="13" fill="#0284C7" fillOpacity="0.45" stroke="#38BDF8" strokeWidth="2.2" />
+            <path d="M29 36 Q35 32 42 35" stroke="#FFFFFF" strokeWidth="2.4" strokeLinecap="round" fill="none" />
+          </g>
+        );
+
+      case 'acc_wizard_hat':
+        return (
+          <g>
+            <ellipse cx="40" cy="54" rx="28" ry="8" fill="#312E81" stroke={stroke} strokeWidth="2.6" />
+            <path d="M21 53 L39 14 L54 24 L49 34 L59 53 Z" fill="#4338CA" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <path d="M23 49 Q40 53 57 49" stroke="#FACC15" strokeWidth="4" fill="none" />
+            <circle cx="40" cy="36" r="3" fill="#FACC15" />
+          </g>
+        );
+
       // --- FURNITURE ---
       case 'furn_study_plant':
         return (
@@ -596,6 +735,41 @@ export const ShopItemVisual: React.FC<ShopItemVisualProps> = ({
             <path d="M33 26 L47 26 L44 37 C43 40 37 40 36 37 Z" fill="#FACC15" stroke={stroke} strokeWidth="1.8" />
             <rect x="38" y="38" width="4" height="6" fill="#EAB308" />
             <rect x="34" y="44" width="12" height="4" rx="1" fill="#EA7A26" stroke={stroke} strokeWidth="1.4" />
+          </g>
+        );
+
+      case 'furn_mini_arcade':
+        return (
+          <g>
+            <path d="M23 18 L57 18 L57 64 L23 64 Z" fill="#4C1D95" stroke={stroke} strokeWidth="2.6" strokeLinejoin="round" />
+            <rect x="27" y="21" width="26" height="6" rx="1.5" fill="#F43F5E" />
+            <rect x="27" y="29" width="26" height="17" rx="2" fill="#0F172A" stroke="#38BDF8" strokeWidth="1.6" />
+            <circle cx="36" cy="37" r="3" fill="#FACC15" />
+            <circle cx="45" cy="39" r="2.5" fill="#34D399" />
+            <circle cx="33" cy="51" r="2.2" fill="#EF4444" />
+            <circle cx="46" cy="51" r="2.2" fill="#38BDF8" />
+            <circle cx="51" cy="51" r="2.2" fill="#FACC15" />
+          </g>
+        );
+
+      case 'furn_telescope':
+        return (
+          <g>
+            <line x1="40" y1="38" x2="24" y2="62" stroke={stroke} strokeWidth="3.2" strokeLinecap="round" />
+            <line x1="40" y1="38" x2="40" y2="63" stroke={stroke} strokeWidth="3.2" strokeLinecap="round" />
+            <line x1="40" y1="38" x2="56" y2="62" stroke={stroke} strokeWidth="3.2" strokeLinecap="round" />
+            <rect x="20" y="24" width="38" height="11" rx="4" transform="rotate(-24 39 30)" fill="#F59E0B" stroke={stroke} strokeWidth="2.5" />
+            <circle cx="56" cy="22" r="5" fill="#BAE6FD" stroke={stroke} strokeWidth="2" />
+          </g>
+        );
+
+      case 'furn_plush_sofa':
+        return (
+          <g>
+            <rect x="14" y="28" width="52" height="26" rx="8" fill="#0891B2" stroke={stroke} strokeWidth="2.6" />
+            <rect x="11" y="38" width="12" height="20" rx="5" fill="#06B6D4" stroke={stroke} strokeWidth="2.4" />
+            <rect x="57" y="38" width="12" height="20" rx="5" fill="#06B6D4" stroke={stroke} strokeWidth="2.4" />
+            <rect x="21" y="42" width="38" height="14" rx="4" fill="#22D3EE" stroke={stroke} strokeWidth="2" />
           </g>
         );
 

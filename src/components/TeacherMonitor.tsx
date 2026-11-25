@@ -3,8 +3,10 @@ import {
   Activity,
   AlertOctagon,
   BookOpen,
+  Calendar,
   Check,
   CheckCircle2,
+  ClipboardCheck,
   Clock,
   Copy,
   Download,
@@ -40,6 +42,8 @@ import {
 import {
   AntiCheatAlert,
   ApprovalStatus,
+  AttendanceRecord,
+  AttendanceStatus,
   AuthorizedFaculty,
   ClassroomSession,
   CluePanel,
@@ -58,7 +62,12 @@ import { GAMES_CATALOG, SLA_SECTIONS } from '../data/defaultDecks';
 import { auth } from '../lib/firebase';
 import { compressCluePhoto } from '../lib/imageUpload';
 import { downloadGeneratedPptx } from '../lib/pptxGenerator';
-import { downloadLeaderboardCsv, parsePlainTextSlides, parsePptxFile } from '../lib/pptxParser';
+import {
+  downloadAttendanceCsv,
+  downloadLeaderboardCsv,
+  parsePlainTextSlides,
+  parsePptxFile,
+} from '../lib/pptxParser';
 import { formatLastSeen, getStudentPresence, timestampToMillis } from '../lib/presence';
 import { QUESTION_TYPE_LABELS, sanitizeQuestionForFirestore } from '../lib/questionUtils';
 import { soundFx } from '../lib/sound';
@@ -103,6 +112,17 @@ interface TeacherMonitorProps {
   onAssignStudentSection: (studentUid: string, section: string) => Promise<void>;
   accessCodes: { teacherCode: string; adminCode: string };
   onUpdateAccessCodes: (teacherCode: string, adminCode: string) => Promise<void>;
+  attendanceRecords?: AttendanceRecord[];
+  onMarkAttendance?: (
+    student: PublicProfile,
+    dateStr: string,
+    status: AttendanceStatus,
+    note?: string
+  ) => Promise<void>;
+  onBulkMarkAttendance?: (
+    dateStr: string,
+    entries: Array<{ student: PublicProfile; status: AttendanceStatus; note?: string }>
+  ) => Promise<void>;
   onSetActivity?: (activity: string) => void;
   onAdminResetApp?: (options: {
     mode: 'scores_only' | 'full_wipe';
@@ -117,7 +137,20 @@ interface TeacherMonitorProps {
   }>;
 }
 
-type MonitorTab = 'live' | 'builder' | 'pptx' | 'admin';
+type MonitorTab = 'live' | 'attendance' | 'builder' | 'pptx' | 'admin';
+
+function getTodayDateString(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function formatClockTime(ts: unknown): string {
+  const ms = timestampToMillis(ts);
+  if (!ms) return '—';
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 function getInitials(name: string): string {
   return (
@@ -189,6 +222,9 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   onAssignStudentSection,
   accessCodes,
   onUpdateAccessCodes,
+  attendanceRecords = [],
+  onMarkAttendance,
+  onBulkMarkAttendance,
   onSetActivity,
   onAdminResetApp,
 }) => {
@@ -300,6 +336,15 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [sectionEdits, setSectionEdits] = useState<Record<string, string>>({});
   const [sectionReviewNotes, setSectionReviewNotes] = useState<Record<string, string>>({});
   const [sectionReviewBusyUid, setSectionReviewBusyUid] = useState<string | null>(null);
+
+  // Class Attendance Sheet state
+  const todayDateStr = getTodayDateString();
+  const [attendanceDate, setAttendanceDate] = useState<string>(todayDateStr);
+  const [attendanceFilter, setAttendanceFilter] = useState<'all' | AttendanceStatus>('all');
+  const [attendanceSearch, setAttendanceSearch] = useState('');
+  const [attendanceNotes, setAttendanceNotes] = useState<Record<string, string>>({});
+  const [markingUid, setMarkingUid] = useState<string | null>(null);
+  const [bulkMarking, setBulkMarking] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
@@ -422,6 +467,65 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
     if (presenceFilter === 'all') return true;
     const { isOnline } = getStudentPresence(st, nowMs);
     return presenceFilter === 'online' ? isOnline : !isOnline;
+  });
+
+  // Class Attendance Computation for all students in the selected classroom/date
+  const attendanceMapForDate = new Map<string, AttendanceRecord>();
+  attendanceRecords.forEach((rec) => {
+    if (rec.date === attendanceDate) {
+      attendanceMapForDate.set(rec.studentId, rec);
+    }
+  });
+  const todayAttendanceMap = new Map<string, AttendanceRecord>();
+  attendanceRecords.forEach((rec) => {
+    if (rec.date === todayDateStr) {
+      todayAttendanceMap.set(rec.studentId, rec);
+    }
+  });
+
+  const sortedClassRoster = [...students].sort((a, b) =>
+    a.displayName.localeCompare(b.displayName)
+  );
+
+  const attendanceRows = sortedClassRoster.map((st) => {
+    const record = attendanceMapForDate.get(st.uid) || null;
+    const status: AttendanceStatus = record?.status || 'absent';
+    const presence = getStudentPresence(st, nowMs);
+    return {
+      student: st,
+      record,
+      status,
+      presence,
+    };
+  });
+
+  const attendanceSummary = {
+    total: attendanceRows.length,
+    present: attendanceRows.filter((r) => r.status === 'present').length,
+    late: attendanceRows.filter((r) => r.status === 'late').length,
+    excused: attendanceRows.filter((r) => r.status === 'excused').length,
+    absent: attendanceRows.filter((r) => r.status === 'absent').length,
+  };
+
+  const todaySummary = {
+    total: sortedClassRoster.length,
+    present: sortedClassRoster.filter((st) => todayAttendanceMap.get(st.uid)?.status === 'present').length,
+    late: sortedClassRoster.filter((st) => todayAttendanceMap.get(st.uid)?.status === 'late').length,
+    excused: sortedClassRoster.filter((st) => todayAttendanceMap.get(st.uid)?.status === 'excused').length,
+    absent: sortedClassRoster.filter(
+      (st) => !todayAttendanceMap.has(st.uid) || todayAttendanceMap.get(st.uid)?.status === 'absent'
+    ).length,
+  };
+
+  const filteredAttendanceRows = attendanceRows.filter((row) => {
+    if (attendanceFilter !== 'all' && row.status !== attendanceFilter) return false;
+    const q = attendanceSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      row.student.displayName.toLowerCase().includes(q) ||
+      (row.student.section || '').toLowerCase().includes(q) ||
+      (row.record?.note || '').toLowerCase().includes(q)
+    );
   });
 
   // Admin Campus-wide live monitoring metrics (no pets, quizzes, or anti-cheat alerts)
@@ -994,10 +1098,12 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               {(isAdmin
                 ? [
                     { id: 'live', label: 'Monitor & Approvals' },
+                    { id: 'attendance', label: 'Class Attendance' },
                     { id: 'admin', label: 'Admin & Secret Codes' },
                   ]
                 : [
                     { id: 'live', label: 'My Classroom' },
+                    { id: 'attendance', label: 'Class Attendance' },
                     { id: 'pptx', label: 'PowerPoint & AI' },
                     { id: 'builder', label: 'Quiz Builder' },
                   ]
@@ -1011,6 +1117,10 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                     setTab(nextTab);
                     if (nextTab === 'live') {
                       onSetActivity?.(isAdmin ? 'Admin Control Center' : `Monitoring: ${myTeachingSection}`);
+                    } else if (nextTab === 'attendance') {
+                      onSetActivity?.(
+                        isAdmin ? 'Reviewing Class Attendance' : `Attendance: ${myTeachingSection}`
+                      );
                     } else if (nextTab === 'pptx') {
                       onSetActivity?.('Importing PPTX Slides');
                     } else if (nextTab === 'builder') {
@@ -1031,25 +1141,30 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             {!isAdmin && (
               <button
                 type="button"
+                disabled={!activeSessionForTarget && (!launcherSelectedDeck || launcherSelectedDeck.questions.length === 0)}
                 onClick={async () => {
-                  soundFx.playQuack();
+                  soundFx.playClick();
+                  if (activeSessionForTarget) {
+                    onLaunchTeacherGame(activeSessionForTarget.gameId, activeSessionForTarget.deckId);
+                    return;
+                  }
                   if (launcherSelectedDeck && launcherTargetSection) {
                     try {
                       await onStartClassroomSession(
                         launcherTargetSection,
-                        'catch_the_duck',
+                        launcherGameId,
                         launcherSelectedDeck
                       );
                     } catch {
-                      // Proceed to host screen even if broadcast fails
+                      // Proceed to monitor view
                     }
+                    onLaunchTeacherGame(launcherGameId, launcherSelectedDeck.id);
                   }
-                  onLaunchTeacherGame('catch_the_duck', launcherSelectedDeck?.id);
                 }}
-                className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                className="px-4 py-2.5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
               >
-                <Play className="w-3.5 h-3.5" />
-                Host Catch the Duck
+                <Eye className="w-3.5 h-3.5" />
+                {activeSessionForTarget ? 'Monitor Live Quiz' : 'Start & Monitor Quiz'}
               </button>
             )}
           </div>
@@ -1202,29 +1317,27 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                     Live Now
                   </span>
-                  {activeSessionForTarget.gameId === 'catch_the_duck' ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playClick();
-                        onLaunchTeacherGame(activeSessionForTarget.gameId, activeSessionForTarget.deckId);
-                      }}
-                      className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      Open Duck Recitation Host
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playClick();
-                        setShowActiveAnswerKey((v) => !v);
-                      }}
-                      className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      {showActiveAnswerKey ? 'Hide Answer Key' : 'View Answer Key'}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      onLaunchTeacherGame(activeSessionForTarget.gameId, activeSessionForTarget.deckId);
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    Open Full Monitor
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      setShowActiveAnswerKey((v) => !v);
+                    }}
+                    className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    {showActiveAnswerKey ? 'Hide Answer Key' : 'View Answer Key'}
+                  </button>
                   <button
                     type="button"
                     disabled={launcherBusy}
@@ -1320,11 +1433,11 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                                 {st.lockedOut
                                   ? 'Anti-Cheat Locked'
                                   : rec
-                                    ? `Finished · ${rec.score} pts (${rec.correctCount}/${rec.totalCount})`
+                                    ? `Finished · Standing By (${rec.score} pts · ${rec.correctCount}/${rec.totalCount})`
                                     : inQuiz
-                                      ? 'Taking Quiz (Locked)'
+                                      ? 'Taking Selected Quiz (Locked)'
                                       : pres.isOnline
-                                        ? 'Entering Quiz...'
+                                        ? 'Entering Selected Quiz...'
                                         : 'Offline'}
                               </p>
                             </div>
@@ -2157,6 +2270,41 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             </div>
           )}
 
+          {/* Compact Today's Attendance Overview Bar */}
+          <div className="bg-white rounded-3xl border border-[#E5DEC9] p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-[#1E5B3A]/10 text-[#1E5B3A] flex items-center justify-center shrink-0">
+                <ClipboardCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-[#EA7A26]">
+                  Today&apos;s Class Attendance · {todayDateStr}
+                </p>
+                <h3 className="text-base font-bold text-[#172A1E]">
+                  {todaySummary.present} Present · {todaySummary.late} Late · {todaySummary.excused} Excused ·{' '}
+                  {todaySummary.absent} Absent{' '}
+                  <span className="text-xs font-semibold text-[#4D6354] tabular-nums">
+                    ({todaySummary.total} total in class)
+                  </span>
+                </h3>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playClick();
+                setTab('attendance');
+                onSetActivity?.(
+                  isAdmin ? 'Reviewing Class Attendance' : `Attendance: ${myTeachingSection}`
+                );
+              }}
+              className="px-4 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <ClipboardCheck className="w-4 h-4" />
+              Open Full Attendance Sheet
+            </button>
+          </div>
+
           {/* Student Roster & Live Activity */}
           <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -2542,6 +2690,433 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {tab === 'attendance' && (
+        <div className="space-y-6">
+          {/* Attendance Header & Date Controls */}
+          <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 space-y-5">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
+                  <ClipboardCheck className="w-4 h-4" />
+                  Daily Class Attendance Sheet
+                </p>
+                <h3 className="text-xl font-bold text-[#172A1E] mt-0.5">
+                  {isAdmin && activeRoomSection === 'ALL'
+                    ? `All SLA Classrooms (${attendanceSummary.total} Students)`
+                    : `${activeRoomSection === '__UNASSIGNED__' ? 'Unassigned Students' : activeRoomSection} (${attendanceSummary.total} Students)`}
+                </h3>
+                <p className="text-xs text-[#4D6354] mt-0.5">
+                  Shows every student enrolled in the class (online and offline). Approved students auto-check-in as Present when they open LORENZONE, and you can mark Late, Excused, or Absent anytime.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#FAF8F2] border border-[#D8D0BC]">
+                  <Calendar className="w-4 h-4 text-[#1E5B3A] shrink-0" />
+                  <input
+                    type="date"
+                    value={attendanceDate}
+                    max={todayDateStr}
+                    onChange={(e) => {
+                      if (e.target.value) setAttendanceDate(e.target.value);
+                    }}
+                    aria-label="Attendance date"
+                    className="bg-transparent text-xs font-bold text-[#172A1E] focus:outline-none"
+                  />
+                </div>
+                {attendanceDate !== todayDateStr && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      setAttendanceDate(todayDateStr);
+                    }}
+                    className="px-3 py-2 rounded-xl border border-[#D8D0BC] bg-white hover:bg-[#FAF8F2] text-xs font-bold text-[#172A1E] cursor-pointer"
+                  >
+                    Today
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    const roomLabel =
+                      isAdmin && activeRoomSection === 'ALL'
+                        ? 'All-Classrooms'
+                        : activeRoomSection === '__UNASSIGNED__'
+                          ? 'Unassigned'
+                          : activeRoomSection;
+                    downloadAttendanceCsv(
+                      attendanceRows.map((r) => ({
+                        studentName: r.student.displayName,
+                        section: r.student.section || 'Unassigned',
+                        status: r.status.toUpperCase(),
+                        presence: r.presence.label,
+                        checkInTime: r.record
+                          ? formatClockTime(r.record.checkInAt || r.record.updatedAt)
+                          : 'Not checked in',
+                        markedBy: r.record?.markedBy || 'System Default',
+                        note: r.record?.note || '',
+                      })),
+                      attendanceDate,
+                      roomLabel
+                    );
+                  }}
+                  className="px-4 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Download className="w-4 h-4" />
+                  Export Attendance CSV
+                </button>
+              </div>
+            </div>
+
+            {/* 5 KPI Summary Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="p-3.5 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9]">
+                <p className="text-[11px] font-semibold text-[#4D6354]">Total in Class</p>
+                <p className="text-2xl font-extrabold text-[#172A1E] tabular-nums mt-0.5">
+                  {attendanceSummary.total}
+                </p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200">
+                <p className="text-[11px] font-semibold text-[#1E5B3A]">Present</p>
+                <p className="text-2xl font-extrabold text-[#1E5B3A] tabular-nums mt-0.5">
+                  {attendanceSummary.present}
+                </p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-amber-50/80 border border-amber-200">
+                <p className="text-[11px] font-semibold text-amber-800">Late</p>
+                <p className="text-2xl font-extrabold text-amber-800 tabular-nums mt-0.5">
+                  {attendanceSummary.late}
+                </p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-sky-50/80 border border-sky-200">
+                <p className="text-[11px] font-semibold text-sky-800">Excused</p>
+                <p className="text-2xl font-extrabold text-sky-800 tabular-nums mt-0.5">
+                  {attendanceSummary.excused}
+                </p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-red-50/70 border border-red-200">
+                <p className="text-[11px] font-semibold text-red-700">Absent</p>
+                <p className="text-2xl font-extrabold text-red-700 tabular-nums mt-0.5">
+                  {attendanceSummary.absent}
+                </p>
+              </div>
+            </div>
+
+            {/* Filters, Search & Quick Batch Marking */}
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 pt-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-[#4D6354] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={attendanceSearch}
+                    onChange={(e) => setAttendanceSearch(e.target.value)}
+                    placeholder="Search student name..."
+                    aria-label="Search student attendance"
+                    className="pl-8 pr-3 py-1.5 rounded-xl border border-[#D8D0BC] text-xs bg-white focus:outline-none focus:border-[#1E5B3A] w-48"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9] text-xs font-semibold">
+                  {(
+                    [
+                      { id: 'all', label: `All (${attendanceSummary.total})` },
+                      { id: 'present', label: `Present (${attendanceSummary.present})` },
+                      { id: 'late', label: `Late (${attendanceSummary.late})` },
+                      { id: 'excused', label: `Excused (${attendanceSummary.excused})` },
+                      { id: 'absent', label: `Absent (${attendanceSummary.absent})` },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setAttendanceFilter(f.id)}
+                      className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors whitespace-nowrap ${
+                        attendanceFilter === f.id
+                          ? 'bg-[#1E5B3A] text-white'
+                          : 'text-[#4D6354] hover:text-[#172A1E]'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {onBulkMarkAttendance && attendanceRows.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={bulkMarking}
+                    onClick={async () => {
+                      const onlineToMark = attendanceRows
+                        .filter((r) => r.presence.isOnline && r.status !== 'present')
+                        .map((r) => ({
+                          student: r.student,
+                          status: 'present' as AttendanceStatus,
+                          note: attendanceNotes[r.student.uid] ?? r.record?.note ?? '',
+                        }));
+                      if (onlineToMark.length === 0) return;
+                      setBulkMarking(true);
+                      try {
+                        await onBulkMarkAttendance(attendanceDate, onlineToMark);
+                        soundFx.playCorrect();
+                      } finally {
+                        setBulkMarking(false);
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {bulkMarking ? 'Saving...' : 'Mark Online Present'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={bulkMarking}
+                    onClick={async () => {
+                      const unmarkedToAbsent = attendanceRows
+                        .filter((r) => !r.record)
+                        .map((r) => ({
+                          student: r.student,
+                          status: 'absent' as AttendanceStatus,
+                          note: attendanceNotes[r.student.uid] ?? '',
+                        }));
+                      if (unmarkedToAbsent.length === 0) return;
+                      setBulkMarking(true);
+                      try {
+                        await onBulkMarkAttendance(attendanceDate, unmarkedToAbsent);
+                        soundFx.playClick();
+                      } finally {
+                        setBulkMarking(false);
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    Save Unchecked as Absent
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Full Class Attendance Roster Table */}
+            {filteredAttendanceRows.length === 0 ? (
+              <p className="text-sm text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
+                {students.length === 0
+                  ? 'No students enrolled in this class yet.'
+                  : 'No students match this attendance filter.'}
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
+                      <th className="py-3 pr-4 font-semibold">Student</th>
+                      <th className="py-3 pr-4 font-semibold">App Presence</th>
+                      <th className="py-3 pr-4 font-semibold">Status</th>
+                      <th className="py-3 pr-4 font-semibold">Time &amp; Source</th>
+                      <th className="py-3 pr-4 font-semibold">Mark Attendance</th>
+                      <th className="py-3 font-semibold">Teacher Note</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F2EFE6]">
+                    {filteredAttendanceRows.map(({ student: st, record, status, presence }) => {
+                      const noteValue = attendanceNotes[st.uid] ?? record?.note ?? '';
+                      const isRowBusy = markingUid === st.uid;
+                      return (
+                        <tr key={st.uid}>
+                          <td className="py-3 pr-4 font-semibold text-[#172A1E]">
+                            <div className="flex items-center gap-2.5">
+                              <div className="relative shrink-0">
+                                {st.photoUrl ? (
+                                  <img
+                                    src={st.photoUrl}
+                                    alt={st.displayName}
+                                    referrerPolicy="no-referrer"
+                                    className="w-9 h-9 rounded-full object-cover border border-[#1E5B3A]"
+                                  />
+                                ) : isAdmin ? (
+                                  <div className="w-9 h-9 rounded-full bg-[#1E5B3A]/10 text-[#1E5B3A] border border-[#1E5B3A]/20 flex items-center justify-center font-bold text-xs">
+                                    {getInitials(st.displayName)}
+                                  </div>
+                                ) : (
+                                  <PetAvatar
+                                    species={st.petSpecies}
+                                    color={st.petColor}
+                                    outfit={st.outfit}
+                                    accessory={st.accessory}
+                                    size={36}
+                                  />
+                                )}
+                                <span
+                                  className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                                    presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                  }`}
+                                />
+                              </div>
+                              <div>
+                                <span>{st.displayName}</span>
+                                <p className="text-[11px] font-normal text-[#4D6354]">
+                                  {st.section || 'Unassigned'}
+                                </p>
+                              </div>
+                            </div>
+                          </td>
+
+                          <td className="py-3 pr-4 text-xs">
+                            <span
+                              className={`inline-flex items-center gap-1.5 font-bold ${
+                                presence.isOnline ? 'text-emerald-700' : 'text-[#4D6354]'
+                              }`}
+                            >
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  presence.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                                }`}
+                              />
+                              {presence.label}
+                            </span>
+                            <p className="text-[11px] text-[#4D6354]">{presence.lastSeenText}</p>
+                          </td>
+
+                          <td className="py-3 pr-4">
+                            <span
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold capitalize whitespace-nowrap ${
+                                status === 'present'
+                                  ? 'bg-emerald-50 text-[#1E5B3A] border-emerald-200'
+                                  : status === 'late'
+                                    ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                    : status === 'excused'
+                                      ? 'bg-sky-50 text-sky-800 border-sky-200'
+                                      : 'bg-red-50 text-red-700 border-red-200'
+                              }`}
+                            >
+                              {status === 'present' && <CheckCircle2 className="w-3.5 h-3.5" />}
+                              {status === 'late' && <Clock className="w-3.5 h-3.5" />}
+                              {status === 'excused' && <ShieldCheck className="w-3.5 h-3.5" />}
+                              {status === 'absent' && <XCircle className="w-3.5 h-3.5" />}
+                              {status}
+                            </span>
+                          </td>
+
+                          <td className="py-3 pr-4 text-xs text-[#4D6354] whitespace-nowrap">
+                            {record ? (
+                              <>
+                                <p className="font-semibold text-[#172A1E] tabular-nums">
+                                  {formatClockTime(record.checkInAt || record.updatedAt)}
+                                </p>
+                                <p className="text-[11px]">
+                                  {record.source === 'auto'
+                                    ? 'Auto Check-In'
+                                    : `Marked by ${record.markedBy || 'Teacher'}`}
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="font-semibold text-red-700">No Check-In</p>
+                                <p className="text-[11px]">Not opened today</p>
+                              </>
+                            )}
+                          </td>
+
+                          <td className="py-3 pr-4">
+                            <div className="flex flex-wrap items-center gap-1">
+                              {(['present', 'late', 'excused', 'absent'] as AttendanceStatus[]).map(
+                                (nextStatus) => {
+                                  const active = status === nextStatus && Boolean(record);
+                                  const activeDefaultAbsent =
+                                    nextStatus === 'absent' && status === 'absent' && !record;
+                                  const isHighlighted = active || activeDefaultAbsent;
+                                  return (
+                                    <button
+                                      key={nextStatus}
+                                      type="button"
+                                      disabled={isRowBusy || !onMarkAttendance}
+                                      onClick={async () => {
+                                        if (!onMarkAttendance) return;
+                                        setMarkingUid(st.uid);
+                                        try {
+                                          await onMarkAttendance(
+                                            st,
+                                            attendanceDate,
+                                            nextStatus,
+                                            noteValue
+                                          );
+                                          soundFx.playClick();
+                                        } finally {
+                                          setMarkingUid(null);
+                                        }
+                                      }}
+                                      className={`px-2 py-1 rounded-lg text-[11px] font-bold capitalize cursor-pointer border transition-colors disabled:opacity-50 ${
+                                        isHighlighted
+                                          ? nextStatus === 'present'
+                                            ? 'bg-[#1E5B3A] text-white border-[#1E5B3A]'
+                                            : nextStatus === 'late'
+                                              ? 'bg-amber-600 text-white border-amber-600'
+                                              : nextStatus === 'excused'
+                                                ? 'bg-sky-700 text-white border-sky-700'
+                                                : 'bg-red-600 text-white border-red-600'
+                                          : 'bg-white text-[#4D6354] border-[#D8D0BC] hover:bg-[#FAF8F2]'
+                                      }`}
+                                    >
+                                      {nextStatus}
+                                    </button>
+                                  );
+                                }
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="py-3">
+                            <div className="flex items-center gap-1.5 min-w-[180px]">
+                              <input
+                                type="text"
+                                maxLength={140}
+                                value={noteValue}
+                                onChange={(e) =>
+                                  setAttendanceNotes((prev) => ({
+                                    ...prev,
+                                    [st.uid]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Optional note..."
+                                aria-label={`Attendance note for ${st.displayName}`}
+                                className="w-full px-2.5 py-1 rounded-lg border border-[#D8D0BC] bg-white text-xs"
+                              />
+                              <button
+                                type="button"
+                                disabled={isRowBusy || !onMarkAttendance}
+                                onClick={async () => {
+                                  if (!onMarkAttendance) return;
+                                  setMarkingUid(st.uid);
+                                  try {
+                                    await onMarkAttendance(
+                                      st,
+                                      attendanceDate,
+                                      status,
+                                      noteValue
+                                    );
+                                    soundFx.playCorrect();
+                                  } finally {
+                                    setMarkingUid(null);
+                                  }
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-[#FAF8F2] border border-[#D8D0BC] hover:border-[#1E5B3A] text-[11px] font-bold text-[#172A1E] cursor-pointer shrink-0 disabled:opacity-50"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

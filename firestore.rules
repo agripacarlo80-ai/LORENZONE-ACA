@@ -164,7 +164,7 @@ service cloud.firestore {
         'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore', 'gamesPlayed',
         'correctAnswers', 'totalAnswers', 'isSleeping', 'lockedOut', 'lockReason',
         'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'foodInventory',
-        'approvalStatus', 'approvalNote', 'createdAt', 'updatedAt'
+        'sleepTickAt', 'roomBackground', 'approvalStatus', 'approvalNote', 'createdAt', 'updatedAt'
       ])
       && isValidId(data.uid)
       && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
@@ -178,7 +178,7 @@ service cloud.firestore {
       && data.accessory is string && data.accessory.size() >= 1 && data.accessory.size() <= 40
       && data.petColor is string && data.petColor.size() >= 1 && data.petColor.size() <= 30
       && data.uniformStyle is string && data.uniformStyle.size() >= 1 && data.uniformStyle.size() <= 40
-      && data.unlockedItems is list && data.unlockedItems.size() <= 40
+      && data.unlockedItems is list && data.unlockedItems.size() <= 100
       && (data.unlockedItems.size() == 0 || data.unlockedItems[0] is string)
       && data.hunger is int && data.hunger >= 0 && data.hunger <= 100
       && data.happiness is int && data.happiness >= 0 && data.happiness <= 100
@@ -196,7 +196,9 @@ service cloud.firestore {
       && (!('photoUrl' in data) || isValidPhotoUrl(data.photoUrl))
       && (!('isOnline' in data) || data.isOnline is bool)
       && (!('lastSeenAt' in data) || data.lastSeenAt is timestamp)
-      && (!('foodInventory' in data) || (data.foodInventory is map && data.foodInventory.size() <= 16))
+      && (!('sleepTickAt' in data) || data.sleepTickAt is timestamp)
+      && (!('roomBackground' in data) || (data.roomBackground is string && data.roomBackground.size() >= 1 && data.roomBackground.size() <= 40))
+      && (!('foodInventory' in data) || (data.foodInventory is map && data.foodInventory.size() <= 32))
       && (!('approvalStatus' in data) || data.approvalStatus in ['pending', 'approved', 'rejected'])
       && (!('approvalNote' in data) || (data.approvalNote is string && data.approvalNote.size() <= 140))
       && data.createdAt is timestamp
@@ -387,6 +389,28 @@ service cloud.firestore {
       && data.updatedAt is timestamp;
     }
 
+    function isValidAttendanceRecord(data) {
+      return data.keys().hasAll([
+        'id', 'date', 'studentId', 'studentName', 'section',
+        'status', 'source', 'markedBy', 'note', 'checkInAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id', 'date', 'studentId', 'studentName', 'section',
+        'status', 'source', 'markedBy', 'note', 'checkInAt', 'updatedAt'
+      ])
+      && isValidId(data.id)
+      && data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && isValidId(data.studentId)
+      && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 60
+      && data.section is string && data.section.size() <= 40
+      && data.status in ['present', 'late', 'absent', 'excused']
+      && data.source in ['auto', 'teacher']
+      && data.markedBy is string && data.markedBy.size() >= 1 && data.markedBy.size() <= 60
+      && data.note is string && data.note.size() <= 140
+      && data.checkInAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
     match /test/connection {
       allow get: if true;
@@ -480,6 +504,7 @@ service cloud.firestore {
         && incoming().uid == request.auth.uid
         && incoming().lockedOut == false
         && (!('lastSeenAt' in incoming()) || incoming().lastSeenAt == request.time)
+        && (!('sleepTickAt' in incoming()) || incoming().sleepTickAt == request.time)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
@@ -513,6 +538,11 @@ service cloud.firestore {
           ('lastSeenAt' in existing() && incoming().lastSeenAt == existing().lastSeenAt)
         )
         && (
+          !('sleepTickAt' in incoming()) ||
+          incoming().sleepTickAt == request.time ||
+          ('sleepTickAt' in existing() && incoming().sleepTickAt == existing().sleepTickAt)
+        )
+        && (
           (
             isOwner(userId) &&
             incoming().role == existing().role &&
@@ -537,7 +567,7 @@ service cloud.firestore {
               'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
-              'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
+              'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping', 'sleepTickAt', 'roomBackground',
               'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'foodInventory',
               'approvalStatus', 'approvalNote', 'updatedAt'
             ])
@@ -554,7 +584,7 @@ service cloud.firestore {
               'displayName', 'role', 'petSpecies', 'petName', 'petLevel', 'petXp', 'coins',
               'outfit', 'accessory', 'petColor', 'uniformStyle', 'unlockedItems',
               'hunger', 'happiness', 'energy', 'cleanliness', 'totalScore',
-              'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping',
+              'gamesPlayed', 'correctAnswers', 'totalAnswers', 'isSleeping', 'sleepTickAt', 'roomBackground',
               'lockedOut', 'lockReason', 'activeGame', 'section', 'photoUrl', 'isOnline', 'lastSeenAt', 'foodInventory',
               'approvalStatus', 'approvalNote', 'updatedAt'
             ])
@@ -823,6 +853,50 @@ service cloud.firestore {
         );
 
       allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    match /attendanceRecords/{recordId} {
+      allow get: if isSignedIn() && isValidId(recordId) && (
+        isTeacher() ||
+        resource == null ||
+        existing().studentId == request.auth.uid
+      );
+      allow list: if isSignedIn() && resource.data.status in ['present', 'late', 'absent', 'excused'];
+
+      allow create: if isSignedIn()
+        && isValidId(recordId)
+        && isValidAttendanceRecord(incoming())
+        && incoming().id == recordId
+        && incoming().checkInAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isApprovedStudentOrFaculty() &&
+            incoming().studentId == request.auth.uid &&
+            incoming().source == 'auto' &&
+            incoming().status == 'present' &&
+            incoming().note == ''
+          ) ||
+          (
+            isTeacher() &&
+            incoming().source == 'teacher'
+          )
+        );
+
+      allow update: if isTeacher()
+        && isValidId(recordId)
+        && isValidAttendanceRecord(incoming())
+        && incoming().id == existing().id
+        && incoming().date == existing().date
+        && incoming().studentId == existing().studentId
+        && incoming().checkInAt == existing().checkInAt
+        && incoming().updatedAt == request.time
+        && incoming().source == 'teacher'
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'studentName', 'section', 'status', 'source', 'markedBy', 'note', 'updatedAt'
+        ]);
+
+      allow delete: if isAdmin() && isValidId(recordId);
     }
   }
 }

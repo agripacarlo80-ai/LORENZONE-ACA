@@ -19,14 +19,24 @@ import {
   Plus,
   HeartPulse,
   Sparkles,
+  Clock,
+  Image as ImageIcon,
 } from 'lucide-react';
-import { PET_COLORS, PET_SPECIES_INFO, SHOP_ITEMS } from '../data/defaultDecks';
+import { serverTimestamp } from 'firebase/firestore';
+import {
+  PET_COLORS,
+  PET_SPECIES_INFO,
+  ROOM_BACKGROUNDS,
+  RoomBackgroundTheme,
+  SHOP_ITEMS,
+} from '../data/defaultDecks';
 import { PetSpecies, PublicProfile, ScoreRecord, ShopCategory, ShopItem } from '../types';
 import { PetAvatar } from './PetAvatar';
 import { ShopItemVisual } from './ShopItemVisual';
 import { soundFx } from '../lib/sound';
 import { compressProfilePhoto } from '../lib/imageUpload';
 import { applyXpGain, getPetHealthState, xpRequiredForLevel } from '../lib/progression';
+import { timestampToMillis } from '../lib/presence';
 
 interface PetHomeAndCareProps {
   profile: PublicProfile;
@@ -77,6 +87,134 @@ const SUB_VIEW_ACTIVITY: Record<HomeSubView, string> = {
   history: 'Viewing Game History',
 };
 
+const SLEEP_RECOVERY_INTERVAL_MS = 120_000;
+
+const AmbientRoomEffects: React.FC<{
+  effect: RoomBackgroundTheme['ambientEffect'];
+  isSleeping?: boolean;
+}> = ({ effect, isSleeping }) => {
+  if (isSleeping || effect === 'stars' || effect === 'aurora') {
+    return (
+      <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]" aria-hidden="true">
+        {effect === 'aurora' && !isSleeping && (
+          <div className="absolute -top-12 left-1/4 w-3/4 h-36 rounded-full bg-gradient-to-r from-emerald-400/20 via-cyan-300/20 to-violet-400/20 blur-2xl" />
+        )}
+        {[
+          { left: '12%', top: '16%', delay: '0s', size: 'w-2 h-2' },
+          { left: '28%', top: '24%', delay: '0.7s', size: 'w-1.5 h-1.5' },
+          { left: '48%', top: '12%', delay: '1.3s', size: 'w-2 h-2' },
+          { left: '72%', top: '20%', delay: '0.4s', size: 'w-1.5 h-1.5' },
+          { left: '86%', top: '14%', delay: '1.9s', size: 'w-2.5 h-2.5' },
+          { left: '62%', top: '34%', delay: '1.1s', size: 'w-1.5 h-1.5' },
+        ].map((star, idx) => (
+          <span
+            key={idx}
+            style={{ left: star.left, top: star.top, animationDelay: star.delay }}
+            className={`absolute rounded-full bg-amber-100 shadow-[0_0_8px_rgba(254,243,199,0.85)] animate-ambient-twinkle ${star.size}`}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (effect === 'petals') {
+    return (
+      <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]" aria-hidden="true">
+        {[
+          { left: '10%', delay: '0s', dur: '7.5s' },
+          { left: '26%', delay: '1.8s', dur: '8.5s' },
+          { left: '44%', delay: '3.2s', dur: '7s' },
+          { left: '63%', delay: '0.9s', dur: '9s' },
+          { left: '78%', delay: '2.4s', dur: '8s' },
+          { left: '90%', delay: '4.1s', dur: '7.8s' },
+        ].map((p, idx) => (
+          <span
+            key={idx}
+            style={{ left: p.left, animationDelay: p.delay, animationDuration: p.dur }}
+            className="absolute -top-4 w-3 h-2 rounded-full bg-pink-200/90 border border-pink-300/60 shadow-xs animate-ambient-petal"
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (effect === 'bubbles') {
+    return (
+      <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]" aria-hidden="true">
+        {[
+          { left: '14%', delay: '0s', size: 'w-3 h-3' },
+          { left: '32%', delay: '1.6s', size: 'w-4 h-4' },
+          { left: '54%', delay: '2.8s', size: 'w-2.5 h-2.5' },
+          { left: '71%', delay: '0.8s', size: 'w-3.5 h-3.5' },
+          { left: '84%', delay: '2.1s', size: 'w-3 h-3' },
+        ].map((b, idx) => (
+          <span
+            key={idx}
+            style={{ left: b.left, animationDelay: b.delay }}
+            className={`absolute bottom-4 rounded-full border border-sky-200/80 bg-white/25 animate-ambient-bubble ${b.size}`}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (effect === 'fireflies') {
+    return (
+      <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]" aria-hidden="true">
+        {[
+          { left: '18%', top: '28%', delay: '0.2s' },
+          { left: '37%', top: '42%', delay: '1.2s' },
+          { left: '66%', top: '26%', delay: '0.8s' },
+          { left: '81%', top: '48%', delay: '1.7s' },
+          { left: '49%', top: '22%', delay: '2.1s' },
+        ].map((f, idx) => (
+          <span
+            key={idx}
+            style={{ left: f.left, top: f.top, animationDelay: f.delay }}
+            className="absolute w-2.5 h-2.5 rounded-full bg-amber-300/90 shadow-[0_0_12px_rgba(252,211,77,0.9)] animate-ambient-twinkle"
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (effect === 'neon') {
+    return (
+      <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]" aria-hidden="true">
+        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-fuchsia-500/70 via-cyan-400/70 to-amber-400/70" />
+        {[
+          { left: '16%', top: '20%', delay: '0.1s', color: 'bg-fuchsia-400' },
+          { left: '76%', top: '24%', delay: '0.9s', color: 'bg-cyan-300' },
+          { left: '34%', top: '34%', delay: '1.6s', color: 'bg-amber-300' },
+          { left: '88%', top: '40%', delay: '0.5s', color: 'bg-emerald-300' },
+        ].map((n, idx) => (
+          <span
+            key={idx}
+            style={{ left: n.left, top: n.top, animationDelay: n.delay }}
+            className={`absolute w-2 h-2 rounded-xs animate-ambient-twinkle ${n.color}`}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]" aria-hidden="true">
+      {[
+        { left: '20%', top: '24%', delay: '0.4s' },
+        { left: '74%', top: '20%', delay: '1.2s' },
+        { left: '48%', top: '16%', delay: '2.0s' },
+      ].map((s, idx) => (
+        <span
+          key={idx}
+          style={{ left: s.left, top: s.top, animationDelay: s.delay }}
+          className="absolute w-1.5 h-1.5 rounded-full bg-amber-100/80 animate-ambient-twinkle"
+        />
+      ))}
+    </div>
+  );
+};
+
 export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
   profile,
   records,
@@ -98,11 +236,13 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
 
   const [previewOutfitId, setPreviewOutfitId] = useState<string | null>(null);
   const [previewAccessoryId, setPreviewAccessoryId] = useState<string | null>(null);
+  const [previewBackgroundId, setPreviewBackgroundId] = useState<string | null>(null);
   const [selectedShopItem, setSelectedShopItem] = useState<ShopItem>(SHOP_ITEMS[0]);
+  const [sleepNowMs, setSleepNowMs] = useState(() => Date.now());
 
   const [petMessage, setPetMessage] = useState<string>(
     profile.isSleeping
-      ? `Good night! ${profile.petName} is resting for tomorrow's quiz.`
+      ? `Zzz... ${profile.petName} is asleep! Restores +5% Energy every 2 minutes.`
       : `Tap ${profile.petName}, drag snacks from the pantry, or start Bath Time!`
   );
   const [editingPetName, setEditingPetName] = useState(profile.petName);
@@ -115,12 +255,23 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
   const petDropRef = useRef<HTMLDivElement | null>(null);
   const lastXpGrantRef = useRef<number>(0);
   const lastScrubTickRef = useRef<number>(0);
+  const lastFurnTapRef = useRef<number>(0);
+  const prevEnergyRef = useRef<number>(profile.energy);
   const moodTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     setEditingPetName(profile.petName);
     setEditingDisplayName(profile.displayName);
   }, [profile.petName, profile.displayName]);
+
+  useEffect(() => {
+    if (!profile.isSleeping || profile.energy >= 100) return;
+    setSleepNowMs(Date.now());
+    const interval = window.setInterval(() => {
+      setSleepNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [profile.isSleeping, profile.energy]);
 
   useEffect(() => {
     return () => {
@@ -130,13 +281,15 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
     };
   }, []);
 
-  const hasLeafBed = profile.unlockedItems.includes('furn_leaf_bed');
   const hasStudyPlant = profile.unlockedItems.includes('furn_study_plant');
   const hasOrangeRug = profile.unlockedItems.includes('furn_orange_rug');
   const hasBookshelf = profile.unlockedItems.includes('furn_bookshelf');
   const hasDeskLamp = profile.unlockedItems.includes('furn_desk_lamp');
+  const hasMiniArcade = profile.unlockedItems.includes('furn_mini_arcade');
   const hasAquarium = profile.unlockedItems.includes('furn_aquarium');
+  const hasTelescope = profile.unlockedItems.includes('furn_telescope');
   const hasBeanbag = profile.unlockedItems.includes('furn_beanbag');
+  const hasPlushSofa = profile.unlockedItems.includes('furn_plush_sofa');
   const hasTrophyCase = profile.unlockedItems.includes('furn_trophy_case');
   const ownedFurniture = useMemo(
     () =>
@@ -145,6 +298,26 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
       ),
     [profile.unlockedItems]
   );
+
+  const activeBackgroundId = profile.roomBackground || 'bg_default_study';
+  const activeBackgroundTheme =
+    ROOM_BACKGROUNDS[activeBackgroundId] || ROOM_BACKGROUNDS.bg_default_study;
+
+  const sleepCountdownText = useMemo(() => {
+    if (!profile.isSleeping) return null;
+    if (profile.energy >= 100) return 'Fully Rested · 100% Energy';
+    const baseMs =
+      timestampToMillis(profile.sleepTickAt) || timestampToMillis(profile.updatedAt) || sleepNowMs;
+    const elapsed = Math.max(0, sleepNowMs - baseMs);
+    const remainingMs = Math.max(
+      0,
+      SLEEP_RECOVERY_INTERVAL_MS - (elapsed % SLEEP_RECOVERY_INTERVAL_MS)
+    );
+    const totalSec = Math.ceil(remainingMs / 1000);
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return `Next +5% Energy in ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }, [profile.isSleeping, profile.energy, profile.sleepTickAt, profile.updatedAt, sleepNowMs]);
 
   const healthState = useMemo(
     () =>
@@ -202,11 +375,25 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
         return 0;
       }
       lastXpGrantRef.current = now;
-      const furnitureXpBonus = (hasBookshelf ? 1 : 0) + (hasTrophyCase ? 2 : 0);
+      const furnitureXpBonus =
+        (hasBookshelf ? 1 : 0) + (hasTelescope ? 1 : 0) + (hasTrophyCase ? 2 : 0);
       return baseXp + furnitureXpBonus;
     },
-    [hasBookshelf, hasTrophyCase, healthState.isSick]
+    [hasBookshelf, hasTelescope, hasTrophyCase, healthState.isSick]
   );
+
+  useEffect(() => {
+    if (profile.isSleeping && profile.energy > prevEnergyRef.current) {
+      const gained = profile.energy - prevEnergyRef.current;
+      spawnParticle(`+${gained}% Energy`, 'orange');
+      setPetMessage(
+        profile.energy >= 100
+          ? `Fully Rested! ${profile.petName} reached 100% Energy!`
+          : `Zzz... ${profile.petName} recovered +${gained}% Energy from resting!`
+      );
+    }
+    prevEnergyRef.current = profile.energy;
+  }, [profile.energy, profile.isSleeping, profile.petName, spawnParticle]);
 
   const baseMood: PetMoodState = useMemo(() => {
     if (healthState.isSick) return 'sick';
@@ -544,9 +731,10 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
 
       const plantBonus = hasStudyPlant ? 5 : 0;
       const beanbagBonus = hasBeanbag ? 6 : 0;
+      const roomFunBonus = (hasMiniArcade ? 5 : 0) + (hasPlushSofa ? 5 : 0);
       const joyNeeded = profile.happiness < 96;
       const gainedXp = computeSmallCareXp(joyNeeded, 3);
-      const joyBoost = 14 + plantBonus + beanbagBonus;
+      const joyBoost = 14 + plantBonus + beanbagBonus + roomFunBonus;
       const nextHappiness = Math.min(100, profile.happiness + joyBoost);
       const nextEnergy = Math.max(0, profile.energy - 6);
       const nextHunger = Math.max(0, profile.hunger - 4);
@@ -610,7 +798,8 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
     try {
       soundFx.playCare();
       triggerMood('blushing', 1000);
-      const plantBonus = (hasStudyPlant ? 3 : 0) + (hasBeanbag ? 6 : 0);
+      const plantBonus =
+        (hasStudyPlant ? 3 : 0) + (hasBeanbag ? 6 : 0) + (hasPlushSofa ? 4 : 0);
       const happinessNeeded = profile.happiness < 96;
       const gainedXp = computeSmallCareXp(happinessNeeded, 2);
       const nextHappiness = Math.min(100, profile.happiness + 6 + plantBonus);
@@ -643,42 +832,79 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
     }
   };
 
+  const handleInteractFurniture = (item: ShopItem) => {
+    soundFx.playCare();
+    triggerMood('excited', 900);
+    const messages: Record<string, { badge: string; tone: FloatingParticle['tone']; text: string }> = {
+      furn_mini_arcade: {
+        badge: 'High Score!',
+        tone: 'orange',
+        text: `${profile.petName} played a quick round on the Retro Mini Arcade!`,
+      },
+      furn_aquarium: {
+        badge: 'Blub Blub!',
+        tone: 'sky',
+        text: `${profile.petName} watched the goldfish blow shimmering bubbles!`,
+      },
+      furn_telescope: {
+        badge: 'Starlight!',
+        tone: 'green',
+        text: `${profile.petName} spotted a bright shooting star through the telescope!`,
+      },
+      furn_plush_sofa: {
+        badge: 'So Comfy!',
+        tone: 'rose',
+        text: `${profile.petName} bounced playfully on the Cloud Velvet Sofa!`,
+      },
+      furn_bookshelf: {
+        badge: 'Study Boost!',
+        tone: 'green',
+        text: `${profile.petName} flipped through favorite San Lorenzo storybooks!`,
+      },
+    };
+    const reaction = messages[item.id] || {
+      badge: `${item.name}!`,
+      tone: 'orange' as const,
+      text: `${profile.petName} loves hanging out near the ${item.name}!`,
+    };
+    spawnParticle(reaction.badge, reaction.tone);
+    setPetMessage(reaction.text);
+
+    const now = Date.now();
+    if (!profile.isSleeping && profile.happiness < 100 && now - lastFurnTapRef.current > 4000) {
+      lastFurnTapRef.current = now;
+      void onUpdateProfile({
+        happiness: Math.min(100, profile.happiness + 2),
+      });
+    }
+  };
+
   const handleToggleSleep = async () => {
     if (actionBusy) return;
     setActionBusy(true);
     try {
       soundFx.playCare();
       const nextSleeping = !profile.isSleeping;
-      let energy = profile.energy;
-      let petXp = profile.petXp;
-      let petLevel = profile.petLevel;
 
       if (nextSleeping) {
-        const rugBonus = hasOrangeRug ? 4 : 0;
-        const lampBonus = hasDeskLamp ? 6 : 0;
-        const bonus = (hasLeafBed ? 35 : 22) + rugBonus + lampBonus;
-        const energyNeeded = profile.energy < 92;
-        const gainedXp = computeSmallCareXp(energyNeeded, 3);
-        energy = Math.min(100, profile.energy + bonus);
-        const leveled = applyXpGain(petLevel, petXp, gainedXp);
-        petXp = leveled.petXp;
-        petLevel = leveled.petLevel;
-        spawnParticle(`+${bonus}% Energy`, 'orange');
-        if (gainedXp > 0) spawnParticle(`+${gainedXp} XP`, 'green');
+        triggerMood('sleepy', 1200);
+        spawnParticle('Zzz... Resting', 'sky');
         setPetMessage(
-          leveled.leveledUp
-            ? `Level Up! ${profile.petName} reached Level ${petLevel}!`
-            : `Zzz... ${profile.petName} is recharging (+${bonus}% Energy).`
+          profile.energy >= 100
+            ? `Zzz... ${profile.petName} is already at 100% Energy and taking a cozy nap!`
+            : `Zzz... ${profile.petName} went to sleep! Recovers +5% Energy every 2 minutes.`
         );
       } else {
+        triggerMood('happy', 900);
         setPetMessage(`Good morning! ${profile.petName} is awake and ready to study!`);
       }
 
       await onUpdateProfile({
         isSleeping: nextSleeping,
-        energy,
-        petXp,
-        petLevel,
+        sleepTickAt: serverTimestamp(),
+        ...(profile.lockedOut
+          ? {}
+          : { activeGame: nextSleeping ? 'Pet Sleeping' : 'Pet Home Room' }),
       });
     } finally {
       setActionBusy(false);
@@ -751,6 +977,15 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
         } finally {
           setActionBusy(false);
         }
+      } else if (item.category === 'backgrounds') {
+        setActionBusy(true);
+        try {
+          setPreviewBackgroundId(null);
+          await onUpdateProfile({ roomBackground: item.id });
+          setPetMessage(`Equipped ${item.name} as your Pet Room background!`);
+        } finally {
+          setActionBusy(false);
+        }
       } else {
         setPetMessage(`${item.name} is active and decorating your Pet Room!`);
       }
@@ -772,7 +1007,7 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
     setActionBusy(true);
     try {
       soundFx.playLevelUp();
-      const nextUnlocked = Array.from(new Set([...profile.unlockedItems, item.id])).slice(0, 40);
+      const nextUnlocked = Array.from(new Set([...profile.unlockedItems, item.id])).slice(0, 100);
       const patch: Partial<PublicProfile> = {
         coins: profile.coins - item.price,
         unlockedItems: nextUnlocked,
@@ -785,11 +1020,17 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
         patch.accessory = item.id;
         setPreviewAccessoryId(null);
       }
+      if (item.category === 'backgrounds') {
+        patch.roomBackground = item.id;
+        setPreviewBackgroundId(null);
+      }
       await onUpdateProfile(patch);
       setPetMessage(
         item.category === 'furniture'
           ? `${item.name} unlocked and placed in your Pet Room!`
-          : `Unlocked & equipped ${item.name}!`
+          : item.category === 'backgrounds'
+            ? `Unlocked & activated ${item.name} in your Pet Room!`
+            : `Unlocked & equipped ${item.name}!`
       );
     } finally {
       setActionBusy(false);
@@ -803,6 +1044,8 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
       setPreviewOutfitId(item.id);
     } else if (item.category === 'accessories') {
       setPreviewAccessoryId(item.id);
+    } else if (item.category === 'backgrounds') {
+      setPreviewBackgroundId(item.id);
     }
   };
 
@@ -833,9 +1076,13 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
 
   const displayedOutfit = previewOutfitId ?? profile.outfit;
   const displayedAccessory = previewAccessoryId ?? profile.accessory;
+  const displayedBackgroundId = previewBackgroundId ?? activeBackgroundId;
+  const displayedBackgroundTheme =
+    ROOM_BACKGROUNDS[displayedBackgroundId] || ROOM_BACKGROUNDS.bg_default_study;
   const isPreviewingUnsaved =
     (previewOutfitId !== null && previewOutfitId !== profile.outfit) ||
-    (previewAccessoryId !== null && previewAccessoryId !== profile.accessory);
+    (previewAccessoryId !== null && previewAccessoryId !== profile.accessory) ||
+    (previewBackgroundId !== null && previewBackgroundId !== activeBackgroundId);
 
   return (
     <div className="space-y-6">
@@ -896,22 +1143,30 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
           <div className="lg:col-span-7 relative rounded-3xl overflow-hidden border border-[#E5DEC9] bg-white min-h-[500px] flex flex-col justify-between select-none">
             <img
               src={
-                profile.isSleeping
-                  ? '/src/assets/images/lorenzone_pet_sleep_1795116397000.jpg'
-                  : '/src/assets/images/lorenzone_pet_room_1795116396715.jpg'
+                profile.isSleeping && activeBackgroundTheme.sleepImageUrl
+                  ? activeBackgroundTheme.sleepImageUrl
+                  : activeBackgroundTheme.imageUrl
               }
-              alt={profile.isSleeping ? 'Pet sleeping bedroom' : 'Pet sunlit study room'}
+              alt={
+                profile.isSleeping
+                  ? `${activeBackgroundTheme.name} at night`
+                  : activeBackgroundTheme.name
+              }
               referrerPolicy="no-referrer"
-              className="absolute inset-0 w-full h-full object-cover"
+              className="absolute inset-0 w-full h-full object-cover transition-all duration-500"
             />
             <div
               className={`absolute inset-0 transition-colors duration-300 ${
                 roomMode === 'wash'
                   ? 'bg-gradient-to-t from-sky-950/65 via-sky-700/30 to-cyan-500/25'
                   : profile.isSleeping
-                    ? 'bg-slate-950/45'
+                    ? 'bg-slate-950/60'
                     : 'bg-gradient-to-t from-black/60 via-black/10 to-black/25'
               }`}
+            />
+            <AmbientRoomEffects
+              effect={activeBackgroundTheme.ambientEffect}
+              isSleeping={profile.isSleeping}
             />
 
             {/* Top HUD inside Room */}
@@ -981,27 +1236,45 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
               </div>
             )}
 
-            {/* Room Furniture & Bath Time Status */}
-            <div className="relative z-10 px-5 flex items-center justify-between pointer-events-none mt-2">
+            {/* Interactive Room Furniture & Sleep / Bath Status */}
+            <div className="relative z-10 px-5 flex flex-wrap items-center justify-between gap-2 mt-2">
               {ownedFurniture.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-1.5 bg-white/90 px-2.5 py-1.5 rounded-2xl shadow-xs max-w-[75%]">
+                <div className="flex flex-wrap items-center gap-1.5 bg-white/90 px-2.5 py-1.5 rounded-2xl shadow-xs max-w-[78%]">
                   {ownedFurniture.map((furn) => (
-                    <ShopItemVisual key={furn.id} itemId={furn.id} size={26} />
+                    <button
+                      key={furn.id}
+                      type="button"
+                      onClick={() => handleInteractFurniture(furn)}
+                      title={`Tap ${furn.name}`}
+                      className="p-0.5 rounded-lg hover:bg-[#FAF8F2] active:scale-95 transition-transform cursor-pointer"
+                    >
+                      <ShopItemVisual itemId={furn.id} size={26} />
+                    </button>
                   ))}
                   <span className="text-[11px] font-bold text-[#1E5B3A] ml-1">
-                    {ownedFurniture.length} Room Item{ownedFurniture.length > 1 ? 's' : ''}
+                    Tap Item ({ownedFurniture.length})
                   </span>
                 </div>
               ) : (
-                <span />
+                <span className="bg-white/85 px-2.5 py-1 rounded-xl text-[11px] font-semibold text-[#172A1E]">
+                  {activeBackgroundTheme.name}
+                </span>
               )}
 
-              {roomMode === 'wash' && (
-                <div className="bg-sky-50/95 border border-sky-200 px-3 py-1 rounded-xl text-[11px] font-bold text-sky-800 flex items-center gap-1.5 shadow-xs">
-                  <Sparkles className="w-3.5 h-3.5 text-sky-500" />
-                  Bath Time · Soap Foam {foamLevel}%
-                </div>
-              )}
+              <div className="flex items-center gap-2">
+                {profile.isSleeping && sleepCountdownText && (
+                  <div className="bg-slate-900/90 border border-amber-300/40 px-3 py-1 rounded-xl text-[11px] font-bold text-amber-200 flex items-center gap-1.5 shadow-xs tabular-nums">
+                    <Clock className="w-3.5 h-3.5 text-amber-300" />
+                    {sleepCountdownText}
+                  </div>
+                )}
+                {roomMode === 'wash' && (
+                  <div className="bg-sky-50/95 border border-sky-200 px-3 py-1 rounded-xl text-[11px] font-bold text-sky-800 flex items-center gap-1.5 shadow-xs">
+                    <Sparkles className="w-3.5 h-3.5 text-sky-500" />
+                    Bath Time · Soap Foam {foamLevel}%
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Center Interactive Pet Stage (Drop Zone) */}
@@ -1296,6 +1569,12 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                         style={{ width: `${stat.value}%` }}
                       />
                     </div>
+                    {stat.label === 'Energy' && profile.isSleeping && sleepCountdownText && (
+                      <p className="text-[11px] font-semibold text-[#EA7A26] mt-1 flex items-center gap-1 tabular-nums">
+                        <Clock className="w-3 h-3" />
+                        {sleepCountdownText} (+5% every 2 mins)
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1404,16 +1683,17 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                 San Lorenzo Academy Shop
               </h3>
               <p className="text-xs text-[#4D6354] mt-1">
-                Level up your pet and save Coins from quizzes to unlock premium foods, drinks, outfits, accessories, and furniture.
+                Level up your pet and save Coins from quizzes to unlock foods, drinks, outfits, accessories, furniture, and cool room backgrounds.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FAF8F2] rounded-xl border border-[#E5DEC9]">
               {(
                 [
-                  { id: 'food', label: 'Foods, Drinks & Meds' },
+                  { id: 'food', label: 'Foods & Drinks' },
                   { id: 'clothes', label: 'Clothes' },
                   { id: 'accessories', label: 'Accessories' },
                   { id: 'furniture', label: 'Furniture' },
+                  { id: 'backgrounds', label: 'Backgrounds' },
                 ] as const
               ).map((cat) => (
                 <button
@@ -1423,7 +1703,12 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                     soundFx.playClick();
                     setShopCategory(cat.id);
                     const firstInCat = SHOP_ITEMS.find((i) => i.category === cat.id);
-                    if (firstInCat) setSelectedShopItem(firstInCat);
+                    if (firstInCat) {
+                      setSelectedShopItem(firstInCat);
+                      if (cat.id === 'backgrounds') {
+                        setPreviewBackgroundId(firstInCat.id);
+                      }
+                    }
                   }}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors whitespace-nowrap ${
                     shopCategory === cat.id ? 'bg-[#1E5B3A] text-white' : 'text-[#4D6354]'
@@ -1437,31 +1722,42 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
 
           {/* Live Try-On & Item Preview Stage */}
           <div className="rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] p-5 grid grid-cols-1 md:grid-cols-12 gap-5 items-center">
-            <div className="md:col-span-5 flex items-center justify-center gap-4 bg-white rounded-2xl border border-[#ECE7D8] p-4 relative">
-              <PetAvatar
-                species={profile.petSpecies}
-                color={profile.petColor}
-                outfit={displayedOutfit}
-                accessory={displayedAccessory}
-                role={profile.role}
-                mood={selectedShopItem.category === 'food' ? 'happy' : 'excited'}
-                cleanliness={profile.cleanliness}
-                size={148}
-                className="animate-float-gentle"
+            <div className="md:col-span-5 flex items-center justify-center gap-4 bg-white rounded-2xl border border-[#ECE7D8] p-4 relative overflow-hidden min-h-[188px]">
+              <img
+                src={displayedBackgroundTheme.imageUrl}
+                alt={displayedBackgroundTheme.name}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full object-cover opacity-90"
               />
-              {selectedShopItem.category === 'food' || selectedShopItem.category === 'furniture' ? (
-                <div className="flex flex-col items-center">
-                  <ShopItemVisual itemId={selectedShopItem.id} size={76} />
-                  <span className="text-[11px] font-bold text-[#4D6354] mt-1">Item Preview</span>
-                </div>
-              ) : null}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-black/15 to-black/20" />
+              <AmbientRoomEffects effect={displayedBackgroundTheme.ambientEffect} />
+
+              <div className="relative z-10 flex items-center justify-center gap-4">
+                <PetAvatar
+                  species={profile.petSpecies}
+                  color={profile.petColor}
+                  outfit={displayedOutfit}
+                  accessory={displayedAccessory}
+                  role={profile.role}
+                  mood={selectedShopItem.category === 'food' ? 'happy' : 'excited'}
+                  cleanliness={profile.cleanliness}
+                  size={148}
+                  className="animate-float-gentle"
+                />
+                {(selectedShopItem.category === 'food' || selectedShopItem.category === 'furniture') && (
+                  <div className="flex flex-col items-center bg-white/95 rounded-xl p-2 shadow-sm">
+                    <ShopItemVisual itemId={selectedShopItem.id} size={72} />
+                    <span className="text-[11px] font-bold text-[#4D6354] mt-1">Preview</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="md:col-span-7 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="text-[11px] font-bold uppercase tracking-wider text-[#EA7A26]">
-                    Live Fitting &amp; Unlock Preview · Requires Lv. {selectedShopItem.requiredLevel}
+                    Live Fitting &amp; Room Preview · Requires Lv. {selectedShopItem.requiredLevel}
                   </p>
                   <h4 className="text-lg font-extrabold text-[#172A1E]">{selectedShopItem.name}</h4>
                 </div>
@@ -1472,6 +1768,7 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                       soundFx.playClick();
                       setPreviewOutfitId(null);
                       setPreviewAccessoryId(null);
+                      setPreviewBackgroundId(null);
                     }}
                     className="px-3 py-1.5 rounded-lg border border-[#D8D0BC] bg-white text-xs font-semibold text-[#4D6354] hover:text-[#172A1E] flex items-center gap-1.5 cursor-pointer"
                   >
@@ -1528,7 +1825,9 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                     onClick={() => void handleBuyOrEquip(selectedShopItem)}
                     className="px-4 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer disabled:opacity-50"
                   >
-                    {profile.outfit === selectedShopItem.id || profile.accessory === selectedShopItem.id
+                    {profile.outfit === selectedShopItem.id ||
+                    profile.accessory === selectedShopItem.id ||
+                    activeBackgroundId === selectedShopItem.id
                       ? 'Currently Equipped'
                       : profile.unlockedItems.includes(selectedShopItem.id) || selectedShopItem.price === 0
                         ? selectedShopItem.category === 'furniture'
@@ -1545,8 +1844,13 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {SHOP_ITEMS.filter((i) => i.category === shopCategory).map((item) => {
               const isFood = item.category === 'food';
+              const isBackground = item.category === 'backgrounds';
               const owned = !isFood && (profile.unlockedItems.includes(item.id) || item.price === 0);
-              const equipped = !isFood && (profile.outfit === item.id || profile.accessory === item.id);
+              const equipped =
+                !isFood &&
+                (profile.outfit === item.id ||
+                  profile.accessory === item.id ||
+                  activeBackgroundId === item.id);
               const isSelected = selectedShopItem.id === item.id;
               const foodQty = foodInventory[item.id] ?? 0;
               const levelLocked = !owned && profile.petLevel < item.requiredLevel;
@@ -1563,13 +1867,22 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                 >
                   <div>
                     {/* Visible Item Artwork Stage */}
-                    <div className="w-full h-28 rounded-xl bg-white border border-[#ECE7D8] flex items-center justify-center relative mb-3">
-                      <ShopItemVisual itemId={item.id} size={82} />
+                    <div className="w-full h-28 rounded-xl bg-white border border-[#ECE7D8] flex items-center justify-center relative mb-3 overflow-hidden">
+                      {isBackground && item.backgroundUrl ? (
+                        <img
+                          src={item.backgroundUrl}
+                          alt={item.name}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <ShopItemVisual itemId={item.id} size={82} />
+                      )}
                       <span
                         className={`absolute top-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold tabular-nums ${
                           levelLocked
                             ? 'bg-amber-100 text-amber-800'
-                            : 'bg-[#FAF8F2] text-[#4D6354] border border-[#E5DEC9]'
+                            : 'bg-white/95 text-[#4D6354] border border-[#E5DEC9]'
                         }`}
                       >
                         Lv. {item.requiredLevel}
@@ -1579,10 +1892,10 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                           ×{foodQty}
                         </span>
                       )}
-                      {!isFood && (item.category === 'clothes' || item.category === 'accessories') && (
-                        <span className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-[#FAF8F2] border border-[#E5DEC9] text-[10px] font-bold text-[#4D6354] flex items-center gap-1">
-                          <Eye className="w-3 h-3" />
-                          Try On
+                      {!isFood && (item.category === 'clothes' || item.category === 'accessories' || isBackground) && (
+                        <span className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-white/95 border border-[#E5DEC9] text-[10px] font-bold text-[#4D6354] flex items-center gap-1">
+                          {isBackground ? <ImageIcon className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                          {isBackground ? 'Preview' : 'Try On'}
                         </span>
                       )}
                     </div>
@@ -1593,6 +1906,8 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                         <span className="text-[10px] font-bold text-emerald-700">Medicine</span>
                       ) : item.isDrink ? (
                         <span className="text-[10px] font-bold text-sky-700">Drink</span>
+                      ) : isBackground ? (
+                        <span className="text-[10px] font-bold text-[#1E5B3A]">Theme</span>
                       ) : null}
                     </div>
                     <p className="text-xs text-[#4D6354] mt-1 leading-relaxed">{item.description}</p>
@@ -1826,7 +2141,7 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-[#172A1E] mb-1.5">
                   SLA Uniform / Outfit
@@ -1868,6 +2183,31 @@ export const PetHomeAndCare: React.FC<PetHomeAndCareProps> = ({
                     (i) =>
                       i.category === 'accessories' &&
                       (i.price === 0 || profile.unlockedItems.includes(i.id) || i.id === profile.accessory)
+                  ).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-[#172A1E] mb-1.5">
+                  Room Background
+                </label>
+                <select
+                  value={activeBackgroundId}
+                  onChange={(e) => {
+                    soundFx.playClick();
+                    void onUpdateProfile({ roomBackground: e.target.value });
+                  }}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#D8D0BC] text-sm bg-white"
+                >
+                  {SHOP_ITEMS.filter(
+                    (i) =>
+                      i.category === 'backgrounds' &&
+                      (i.price === 0 ||
+                        profile.unlockedItems.includes(i.id) ||
+                        i.id === activeBackgroundId)
                   ).map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.name}

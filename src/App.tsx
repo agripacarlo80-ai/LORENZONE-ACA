@@ -33,6 +33,8 @@ import {
   AccessCodesConfig,
   AntiCheatAlert,
   AppTab,
+  AttendanceRecord,
+  AttendanceStatus,
   AuthorizedFaculty,
   ClassroomSession,
   GameId,
@@ -81,6 +83,18 @@ function sectionToSessionId(section: string): string {
   return `room_${slug}_${hashHex}`;
 }
 
+function getLocalDateKey(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function buildAttendanceDocId(dateStr: string, studentId: string): string {
+  const safeDate = dateStr.replace(/[^0-9]/g, '_');
+  return `att_${safeDate}_${studentId}`.slice(0, 128);
+}
+
 function LorenzoneApp() {
   const [showSplash, setShowSplash] = useState(true);
   const [authReady, setAuthReady] = useState(false);
@@ -101,6 +115,7 @@ function LorenzoneApp() {
   const [scoreRecords, setScoreRecords] = useState<ScoreRecord[]>([]);
   const [alerts, setAlerts] = useState<AntiCheatAlert[]>([]);
   const [classroomSessions, setClassroomSessions] = useState<ClassroomSession[]>([]);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [myIdVerification, setMyIdVerification] = useState<SchoolIdVerification | null>(null);
   const [myIdVerificationLoaded, setMyIdVerificationLoaded] = useState(false);
   const [schoolIdVerifications, setSchoolIdVerifications] = useState<SchoolIdVerification[]>([]);
@@ -123,6 +138,7 @@ function LorenzoneApp() {
   const [activeTab, setActiveTab] = useState<AppTab>('home');
   const [launchGameId, setLaunchGameId] = useState<GameId | null>(null);
   const [launchDeckId, setLaunchDeckId] = useState<string | null>(null);
+  const [studentQuizLockActive, setStudentQuizLockActive] = useState(false);
 
   const [muted, setMuted] = useState(() => soundFx.isMuted());
   const [theme, setTheme] = useState<ThemeColor>(() => {
@@ -165,6 +181,7 @@ function LorenzoneApp() {
         setSchoolIdVerifications([]);
         setMySectionRequest(null);
         setSectionChangeRequests([]);
+        setAttendanceRecords([]);
       }
     });
     return () => unsub();
@@ -459,6 +476,24 @@ function LorenzoneApp() {
         )
       : () => {};
 
+    const unsubAttendance =
+      isTeacherUser || isAdminUser
+        ? onSnapshot(
+            query(
+              collection(db, 'attendanceRecords'),
+              where('status', 'in', ['present', 'late', 'absent', 'excused'])
+            ),
+            (snap) => {
+              const list = snap.docs.map((d) => d.data() as AttendanceRecord);
+              list.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
+              setAttendanceRecords(list);
+            },
+            (err) => handleFirestoreError(err, OperationType.LIST, 'attendanceRecords')
+          )
+        : () => {
+            setAttendanceRecords([]);
+          };
+
     return () => {
       unsubAllProfiles();
       unsubDecks();
@@ -470,6 +505,7 @@ function LorenzoneApp() {
       unsubVerifications();
       unsubSectionRequests();
       unsubClassSessions();
+      unsubAttendance();
     };
   }, [authReady, user, myProfile?.uid, myProfile?.role, isUnapprovedStudent]);
 
@@ -521,7 +557,58 @@ function LorenzoneApp() {
     };
   }, [authReady, user, myProfile?.uid]);
 
-  // Passive pet care decay: only for approved non-admin users who actually use pets
+  // Daily student auto check-in for class attendance roster
+  const autoCheckedInKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      !authReady ||
+      !user ||
+      !myProfile?.uid ||
+      myProfile.role !== 'student' ||
+      myProfile.approvalStatus !== 'approved'
+    ) {
+      return;
+    }
+    const todayKey = getLocalDateKey();
+    const checkKey = `${user.uid}_${todayKey}`;
+    if (autoCheckedInKeyRef.current === checkKey) return;
+    autoCheckedInKeyRef.current = checkKey;
+
+    const docId = buildAttendanceDocId(todayKey, user.uid);
+    const attRef = doc(db, 'attendanceRecords', docId);
+    void (async () => {
+      try {
+        const snap = await getDoc(attRef);
+        if (!snap.exists()) {
+          await setDoc(attRef, {
+            id: docId,
+            date: todayKey,
+            studentId: user.uid,
+            studentName: (myProfile.displayName || 'SLA Student').slice(0, 60),
+            section: (myProfile.section || '').trim().slice(0, 40),
+            status: 'present',
+            source: 'auto',
+            markedBy: 'Auto Check-In',
+            note: '',
+            checkInAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `attendanceRecords/${docId}`);
+      }
+    })();
+  }, [
+    authReady,
+    user,
+    myProfile?.uid,
+    myProfile?.role,
+    myProfile?.approvalStatus,
+    myProfile?.displayName,
+    myProfile?.section,
+  ]);
+
+  // Passive pet care decay & 2-minute (+5% energy) sleep recovery
   const initialDecayDoneRef = useRef<string | null>(null);
   useEffect(() => {
     if (!authReady || !user || !myProfile?.uid || myProfile.role === 'admin' || isUnapprovedStudent) return;
@@ -537,26 +624,36 @@ function LorenzoneApp() {
     };
 
     const lastMs = toMs(myProfile.lastSeenAt) || toMs(myProfile.updatedAt);
+    const sleepBaseMs = toMs(myProfile.sleepTickAt) || lastMs;
+    const sleepTicks =
+      myProfile.isSleeping && sleepBaseMs > 0 && myProfile.energy < 100
+        ? Math.min(20, Math.floor(Math.max(0, Date.now() - sleepBaseMs) / 120_000))
+        : 0;
+
+    const patch: Record<string, unknown> = {};
+    if (sleepTicks > 0) {
+      patch.energy = Math.min(100, myProfile.energy + sleepTicks * 5);
+      patch.sleepTickAt = serverTimestamp();
+    }
+
     if (lastMs > 0) {
       const elapsedMins = Math.floor((Date.now() - lastMs) / 60_000);
       if (elapsedMins >= 25) {
         const steps = Math.min(45, Math.floor(elapsedMins / 20));
         if (steps > 0) {
-          const nextHunger = Math.max(10, myProfile.hunger - steps * 2);
-          const nextClean = Math.max(10, myProfile.cleanliness - Math.floor(steps * 1.5));
-          const nextJoy = Math.max(12, myProfile.happiness - steps);
-          const nextEnergy = myProfile.isSleeping
-            ? Math.min(100, myProfile.energy + steps * 4)
-            : Math.max(14, myProfile.energy - steps);
-          void updateDoc(doc(db, 'publicProfiles', user.uid), {
-            hunger: nextHunger,
-            cleanliness: nextClean,
-            happiness: nextJoy,
-            energy: nextEnergy,
-            updatedAt: serverTimestamp(),
-          }).catch(() => {});
+          patch.hunger = Math.max(10, myProfile.hunger - steps * 2);
+          patch.cleanliness = Math.max(10, myProfile.cleanliness - Math.floor(steps * 1.5));
+          patch.happiness = Math.max(12, myProfile.happiness - steps);
+          if (!myProfile.isSleeping) {
+            patch.energy = Math.max(14, myProfile.energy - steps);
+          }
         }
       }
+    }
+
+    if (Object.keys(patch).length > 0) {
+      patch.updatedAt = serverTimestamp();
+      void updateDoc(doc(db, 'publicProfiles', user.uid), patch).catch(() => {});
     }
   }, [authReady, user, myProfile, isUnapprovedStudent]);
 
@@ -565,12 +662,15 @@ function LorenzoneApp() {
     const decayTimer = window.setInterval(() => {
       const curr = myProfileRef.current;
       if (!curr || curr.role === 'admin' || document.visibilityState === 'hidden') return;
-      const nextHunger = Math.max(8, curr.hunger - 2);
-      const nextClean = Math.max(8, curr.cleanliness - 2);
+      const nextHunger = curr.isSleeping
+        ? Math.max(10, curr.hunger - 1)
+        : Math.max(8, curr.hunger - 2);
+      const nextClean = curr.isSleeping
+        ? Math.max(10, curr.cleanliness - 1)
+        : Math.max(8, curr.cleanliness - 2);
       const nextJoy = Math.max(10, curr.happiness - 1);
-      const nextEnergy = curr.isSleeping
-        ? Math.min(100, curr.energy + 5)
-        : Math.max(10, curr.energy - 1);
+      // While sleeping, energy NEVER recovers inside the 75s decay loop (strict 2-min +5% recovery)
+      const nextEnergy = curr.isSleeping ? curr.energy : Math.max(10, curr.energy - 1);
 
       if (
         nextHunger === curr.hunger &&
@@ -592,6 +692,59 @@ function LorenzoneApp() {
 
     return () => window.clearInterval(decayTimer);
   }, [authReady, user, myProfile?.uid, myProfile?.role, isUnapprovedStudent]);
+
+  // Dedicated 2-minute (+5% energy) pet sleep recovery timer
+  useEffect(() => {
+    if (
+      !authReady ||
+      !user ||
+      !myProfile?.uid ||
+      myProfile.role === 'admin' ||
+      isUnapprovedStudent ||
+      !myProfile.isSleeping ||
+      myProfile.energy >= 100
+    ) {
+      return;
+    }
+
+    const toMs = (val: unknown): number => {
+      if (!val || typeof val !== 'object') return 0;
+      const maybeTs = val as { toMillis?: () => number; seconds?: number };
+      if (typeof maybeTs.toMillis === 'function') return maybeTs.toMillis();
+      if (typeof maybeTs.seconds === 'number') return maybeTs.seconds * 1000;
+      return 0;
+    };
+
+    const checkSleepRecovery = () => {
+      const curr = myProfileRef.current;
+      if (!curr || !curr.isSleeping || curr.energy >= 100) return;
+      const baseMs = toMs(curr.sleepTickAt) || toMs(curr.updatedAt);
+      if (!baseMs) return;
+      const elapsed = Date.now() - baseMs;
+      if (elapsed < 120_000) return;
+      const ticks = Math.floor(elapsed / 120_000);
+      const nextEnergy = Math.min(100, curr.energy + ticks * 5);
+      if (nextEnergy <= curr.energy) return;
+
+      void updateDoc(doc(db, 'publicProfiles', user.uid), {
+        energy: nextEnergy,
+        sleepTickAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    };
+
+    checkSleepRecovery();
+    const sleepTimer = window.setInterval(checkSleepRecovery, 10_000);
+    return () => window.clearInterval(sleepTimer);
+  }, [
+    authReady,
+    user,
+    myProfile?.uid,
+    myProfile?.role,
+    myProfile?.isSleeping,
+    myProfile?.energy,
+    isUnapprovedStudent,
+  ]);
 
   const handleGoogleLogin = async () => {
     setAuthLoading(true);
@@ -683,6 +836,8 @@ function LorenzoneApp() {
       correctAnswers: 0,
       totalAnswers: 0,
       isSleeping: false,
+      sleepTickAt: serverTimestamp(),
+      roomBackground: 'bg_default_study',
       lockedOut: false,
       lockReason: '',
       activeGame:
@@ -1315,6 +1470,115 @@ function LorenzoneApp() {
     return Array.from(byId.values());
   }, [ownDecks, publishedDecks]);
 
+  const handleMarkAttendance = useCallback(
+    async (
+      student: PublicProfile,
+      dateStr: string,
+      status: AttendanceStatus,
+      note?: string
+    ) => {
+      if (!user || !myProfile || (myProfile.role !== 'teacher' && myProfile.role !== 'admin')) {
+        return;
+      }
+      const docId = buildAttendanceDocId(dateStr, student.uid);
+      const attRef = doc(db, 'attendanceRecords', docId);
+      const markerName = (myProfile.displayName || 'SLA Teacher').slice(0, 60);
+      const cleanNote = (note ?? '').trim().slice(0, 140);
+      const cleanSection = (student.section || '').trim().slice(0, 40);
+      const cleanName = (student.displayName || 'SLA Student').slice(0, 60);
+
+      try {
+        const snap = await getDoc(attRef);
+        if (snap.exists()) {
+          await updateDoc(attRef, {
+            studentName: cleanName,
+            section: cleanSection,
+            status,
+            source: 'teacher',
+            markedBy: markerName,
+            note: cleanNote,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(attRef, {
+            id: docId,
+            date: dateStr,
+            studentId: student.uid,
+            studentName: cleanName,
+            section: cleanSection,
+            status,
+            source: 'teacher',
+            markedBy: markerName,
+            note: cleanNote,
+            checkInAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `attendanceRecords/${docId}`);
+      }
+    },
+    [myProfile, user]
+  );
+
+  const handleBulkMarkAttendance = useCallback(
+    async (
+      dateStr: string,
+      entries: Array<{ student: PublicProfile; status: AttendanceStatus; note?: string }>
+    ) => {
+      if (!user || !myProfile || (myProfile.role !== 'teacher' && myProfile.role !== 'admin')) {
+        return;
+      }
+      if (entries.length === 0) return;
+
+      const markerName = (myProfile.displayName || 'SLA Teacher').slice(0, 60);
+      const existingIds = new Set(attendanceRecords.map((r) => r.id));
+
+      try {
+        for (let i = 0; i < entries.length; i += 400) {
+          const batch = writeBatch(db);
+          entries.slice(i, i + 400).forEach(({ student, status, note }) => {
+            const docId = buildAttendanceDocId(dateStr, student.uid);
+            const attRef = doc(db, 'attendanceRecords', docId);
+            const cleanNote = (note ?? '').trim().slice(0, 140);
+            const cleanSection = (student.section || '').trim().slice(0, 40);
+            const cleanName = (student.displayName || 'SLA Student').slice(0, 60);
+
+            if (existingIds.has(docId)) {
+              batch.update(attRef, {
+                studentName: cleanName,
+                section: cleanSection,
+                status,
+                source: 'teacher',
+                markedBy: markerName,
+                note: cleanNote,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              batch.set(attRef, {
+                id: docId,
+                date: dateStr,
+                studentId: student.uid,
+                studentName: cleanName,
+                section: cleanSection,
+                status,
+                source: 'teacher',
+                markedBy: markerName,
+                note: cleanNote,
+                checkInAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+          });
+          await batch.commit();
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'attendanceRecords');
+      }
+    },
+    [attendanceRecords, myProfile, user]
+  );
+
   const handleAdminResetApp = useCallback(
     async (options: {
       mode: 'scores_only' | 'full_wipe';
@@ -1339,7 +1603,15 @@ function LorenzoneApp() {
         }
       };
 
-      const [scoresSnap, alertsSnap, profilesSnap, classSessionsSnap, verificationsSnap, sectionReqsSnap] = await Promise.all([
+      const [
+        scoresSnap,
+        alertsSnap,
+        profilesSnap,
+        classSessionsSnap,
+        verificationsSnap,
+        sectionReqsSnap,
+        attendanceSnap,
+      ] = await Promise.all([
         getDocs(query(collection(db, 'scoreRecords'), where('score', '>=', 0))),
         getDocs(query(collection(db, 'antiCheatAlerts'), where('status', 'in', ['locked', 'allowed']))),
         getDocs(query(collection(db, 'publicProfiles'), where('role', 'in', ['student', 'teacher', 'admin']))),
@@ -1354,6 +1626,12 @@ function LorenzoneApp() {
           query(
             collection(db, 'sectionChangeRequests'),
             where('status', 'in', ['pending', 'approved', 'rejected'])
+          )
+        ),
+        getDocs(
+          query(
+            collection(db, 'attendanceRecords'),
+            where('status', 'in', ['present', 'late', 'absent', 'excused'])
           )
         ),
       ]);
@@ -1421,6 +1699,10 @@ function LorenzoneApp() {
 
         sectionReqsSnap.docs.forEach((sDoc) => {
           ops.push((batch) => batch.delete(sDoc.ref));
+        });
+
+        attendanceSnap.docs.forEach((aDoc) => {
+          ops.push((batch) => batch.delete(aDoc.ref));
         });
 
         profilesSnap.docs.forEach((pDoc) => {
@@ -1539,8 +1821,6 @@ function LorenzoneApp() {
   );
 
   const handleCompleteClassroomSession = useCallback((sessionKey: string) => {
-    setLaunchGameId(null);
-    setLaunchDeckId(null);
     setCompletedClassSessionKeys((prev) => {
       if (prev.includes(sessionKey)) return prev;
       const next = [...prev.slice(-24), sessionKey];
@@ -1587,7 +1867,7 @@ function LorenzoneApp() {
   }, [myClassroomSession, completedClassSessionKeys, allDecks]);
 
   const isStudentLockedInClassQuiz = Boolean(
-    myProfile?.role === 'student' && forcedLaunchSession
+    myProfile?.role === 'student' && (forcedLaunchSession || studentQuizLockActive)
   );
 
   useEffect(() => {
@@ -1708,6 +1988,16 @@ function LorenzoneApp() {
   }
 
   const isAdminUser = myProfile.role === 'admin';
+  const activeTeacherSession =
+    myProfile.role === 'teacher'
+      ? classroomSessions
+          .filter(
+            (s) =>
+              s.status === 'active' &&
+              (!myProfile.section?.trim() || s.section.trim() === myProfile.section.trim())
+          )
+          .sort((a, b) => toMillis(b.startedAt) - toMillis(a.startedAt))[0] || null
+      : null;
   const pendingApprovalCount = isAdminUser
     ? allProfiles.filter((p) => p.role === 'student' && p.approvalStatus !== 'approved').length
     : 0;
@@ -1729,12 +2019,19 @@ function LorenzoneApp() {
               setActiveTab(isAdminUser ? 'monitor' : 'home');
             }}
             aria-disabled={isStudentLockedInClassQuiz}
-            className={`text-xl font-extrabold tracking-tight whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-2.5 text-xl font-extrabold tracking-tight whitespace-nowrap shrink-0 ${
               isStudentLockedInClassQuiz ? 'opacity-80 cursor-not-allowed' : ''
             }`}
             style={{ color: 'var(--lz-header-brand-left)' }}
           >
-            LOREN<span style={{ color: 'var(--lz-header-brand-right)' }}>ZONE</span>
+            <img
+              src="/assets/aistudio/fd5c8fff-13fe-46ee-baba-021f77749eb4_5f87432b.jpg"
+              alt="San Lorenzo Academy Logo"
+              className="w-10 h-10 rounded-full object-cover border border-[#E5DEC9] bg-white shrink-0"
+            />
+            <span>
+              LOREN<span style={{ color: 'var(--lz-header-brand-right)' }}>ZONE</span>
+            </span>
           </a>
 
           <nav className="flex items-center gap-6 text-sm font-semibold overflow-x-auto">
@@ -1748,7 +2045,7 @@ function LorenzoneApp() {
                     soundFx.playClick();
                     setActiveTab('home');
                   }}
-                  title={isStudentLockedInClassQuiz ? 'Locked until live classroom quiz ends' : undefined}
+                  title={isStudentLockedInClassQuiz ? 'Locked until quiz and classroom standby finish' : undefined}
                   className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors ${
                     isStudentLockedInClassQuiz
                       ? 'border-transparent text-[var(--lz-header-nav)] opacity-45 cursor-not-allowed'
@@ -1777,7 +2074,11 @@ function LorenzoneApp() {
                         : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)] cursor-pointer'
                   }`}
                 >
-                  {isStudentLockedInClassQuiz ? 'Live Class Quiz (Locked)' : 'Quiz Games'}
+                  {isStudentLockedInClassQuiz
+                    ? 'Quiz Locked'
+                    : myProfile.role === 'teacher'
+                      ? 'Class Quizzes'
+                      : 'Quiz Games'}
                 </button>
               </>
             )}
@@ -1805,7 +2106,7 @@ function LorenzoneApp() {
                 soundFx.playClick();
                 setActiveTab('leaderboard');
               }}
-              title={isStudentLockedInClassQuiz ? 'Locked until live classroom quiz ends' : undefined}
+              title={isStudentLockedInClassQuiz ? 'Locked until quiz and classroom standby finish' : undefined}
               className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors ${
                 isStudentLockedInClassQuiz
                   ? 'border-transparent text-[var(--lz-header-nav)] opacity-45 cursor-not-allowed'
@@ -1835,6 +2136,24 @@ function LorenzoneApp() {
                 <Lock className="w-3.5 h-3.5" />
                 Quiz Locked
               </span>
+            ) : myProfile.role === 'teacher' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  soundFx.playClick();
+                  if (activeTeacherSession) {
+                    setLaunchGameId(activeTeacherSession.gameId);
+                    setLaunchDeckId(activeTeacherSession.deckId);
+                  } else {
+                    setLaunchGameId(null);
+                    setLaunchDeckId(null);
+                  }
+                  setActiveTab('games');
+                }}
+                className="px-4 py-2 rounded-xl bg-[var(--lz-header-cta-bg)] hover:bg-[var(--lz-header-cta-hover)] text-white text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {activeTeacherSession ? 'Monitor Live Quiz' : 'Start Quiz'}
+              </button>
             ) : (
               <button
                 type="button"
@@ -1955,7 +2274,9 @@ function LorenzoneApp() {
             initialDeckId={launchDeckId}
             classroomSessions={classroomSessions}
             forcedLaunchSession={forcedLaunchSession}
+            activeStudentClassSession={myClassroomSession}
             onCompleteClassroomSession={handleCompleteClassroomSession}
+            onQuizLockChange={setStudentQuizLockActive}
             onExitLaunchReset={() => {
               setLaunchGameId(null);
               setLaunchDeckId(null);
@@ -2013,6 +2334,9 @@ function LorenzoneApp() {
             onAssignStudentSection={handleAssignStudentSection}
             accessCodes={accessCodes}
             onUpdateAccessCodes={handleUpdateAccessCodes}
+            attendanceRecords={attendanceRecords}
+            onMarkAttendance={handleMarkAttendance}
+            onBulkMarkAttendance={handleBulkMarkAttendance}
             onSetActivity={(act) => void reportActivity(act)}
             onAdminResetApp={handleAdminResetApp}
           />

@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   Coins,
   Eye,
   Gamepad2,
@@ -74,7 +75,9 @@ interface MiniGamesHubProps {
   initialDeckId?: string | null;
   classroomSessions?: ClassroomSession[];
   forcedLaunchSession?: ForcedClassroomLaunch | null;
+  activeStudentClassSession?: ClassroomSession | null;
   onCompleteClassroomSession?: (sessionKey: string) => void;
+  onQuizLockChange?: (locked: boolean) => void;
   onExitLaunchReset?: () => void;
   onStartClassroomSession?: (section: string, gameId: GameId, deck: QuizDeck) => Promise<void>;
   onEndClassroomSession?: (sessionId: string) => Promise<void>;
@@ -114,7 +117,9 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   initialDeckId = null,
   classroomSessions = [],
   forcedLaunchSession = null,
+  activeStudentClassSession = null,
   onCompleteClassroomSession,
+  onQuizLockChange,
   onExitLaunchReset,
   onStartClassroomSession,
   onEndClassroomSession,
@@ -145,14 +150,20 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showAnswerKey, setShowAnswerKey] = useState(false);
 
-  const [broadcastToClass, setBroadcastToClass] = useState<boolean>(profile.role === 'teacher');
+  const [broadcastToClass, setBroadcastToClass] = useState<boolean>(isFaculty);
   const [broadcastSection, setBroadcastSection] = useState<string>(defaultSection);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const enteredFullscreenRef = useRef(false);
   const startWidthRef = useRef<number>(typeof window !== 'undefined' ? window.innerWidth : 1200);
   const blurTimeoutRef = useRef<number | null>(null);
   const lockTriggeredRef = useRef(false);
   const appliedForcedKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const selectedDeck = decks.find((d) => d.id === selectedDeckId) || decks[0];
   const activeGameMeta = GAMES_CATALOG.find((g) => g.id === activeGameId) || null;
@@ -163,6 +174,9 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
       forcedLaunchSession &&
       forcedLaunchSession.gameId === activeGameId &&
       forcedLaunchSession.deckId === selectedDeck?.id
+  );
+  const isUnfinishedStudentQuiz = Boolean(
+    profile.role === 'student' && activeGameId && !gameResult
   );
 
   // Keep selectedDeckId valid if custom decks are edited or deleted
@@ -312,7 +326,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
       setCompletedFromLiveSession(false);
       setActiveGameId(initialGameId);
       const meta = GAMES_CATALOG.find((g) => g.id === initialGameId);
-      const verb = profile.role === 'student' ? 'Playing' : 'Hosting';
+      const verb = profile.role === 'student' ? 'Playing' : 'Monitoring';
       void onSetActiveGame(`${verb}: ${meta?.title || initialGameId}`);
     }
   }, [initialGameId, forcedLaunchSession, onSetActiveGame, profile.role]);
@@ -495,7 +509,8 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
   };
 
   const exitGame = () => {
-    if (isLockedInForcedClassQuiz && !gameResult) return;
+    if (isUnfinishedStudentQuiz || (isLockedInForcedClassQuiz && !gameResult)) return;
+    if (standbyWaitingForOthers) return;
     soundFx.playClick();
     enteredFullscreenRef.current = false;
     if (document.fullscreenElement) {
@@ -527,9 +542,13 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
     }
 
     const wasForcedLive = Boolean(
-      forcedLaunchSession &&
+      (forcedLaunchSession &&
         forcedLaunchSession.gameId === activeGameMeta.id &&
-        forcedLaunchSession.deckId === selectedDeck.id
+        forcedLaunchSession.deckId === selectedDeck.id) ||
+        (activeStudentClassSession &&
+          activeStudentClassSession.status === 'active' &&
+          activeStudentClassSession.gameId === activeGameMeta.id &&
+          activeStudentClassSession.deckId === selectedDeck.id)
     );
     setCompletedFromLiveSession(wasForcedLive);
     setGameResult(result);
@@ -538,8 +557,79 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
       onCompleteClassroomSession?.(forcedLaunchSession.sessionKey);
     }
     await onRecordGameResult(activeGameMeta.id, activeGameMeta.title, selectedDeck, result);
-    void onSetActiveGame('Browsing Quiz Games');
+    void onSetActiveGame(wasForcedLive ? `Standby: ${activeGameMeta.title}` : 'Browsing Quiz Games');
   };
+
+  // Live Classroom Standby tracking for students who finished early
+  const activeStandbySession = useMemo(() => {
+    if (profile.role !== 'student' || !gameResult || !completedFromLiveSession) return null;
+    if (
+      activeStudentClassSession &&
+      activeStudentClassSession.status === 'active' &&
+      activeStudentClassSession.gameId === activeGameId &&
+      activeStudentClassSession.deckId === selectedDeck?.id
+    ) {
+      return activeStudentClassSession;
+    }
+    return null;
+  }, [profile.role, gameResult, completedFromLiveSession, activeStudentClassSession, activeGameId, selectedDeck?.id]);
+
+  const standbyPeers = useMemo(() => {
+    if (!activeStandbySession) return [];
+    const sec = activeStandbySession.section.trim();
+    const sessionStartMs = timestampToMillis(activeStandbySession.startedAt);
+    return allProfiles
+      .filter(
+        (p) =>
+          p.role === 'student' &&
+          (p.section || '').trim() === sec &&
+          p.approvalStatus !== 'rejected'
+      )
+      .map((st) => {
+        const pres = getStudentPresence(st, nowMs);
+        const rec = records.find(
+          (r) =>
+            r.studentId === st.uid &&
+            r.gameId === activeStandbySession.gameId &&
+            r.deckId === activeStandbySession.deckId &&
+            (!sessionStartMs || timestampToMillis(r.createdAt) >= sessionStartMs - 5000)
+        );
+        const isFinished = st.uid === profile.uid || Boolean(rec);
+        const isTaking =
+          !isFinished &&
+          pres.isOnline &&
+          (st.activeGame === `Playing: ${activeStandbySession.gameTitle}` || st.lockedOut);
+        return {
+          profile: st,
+          isOnline: pres.isOnline,
+          isFinished,
+          isTaking,
+        };
+      })
+      .sort((a, b) => {
+        if (a.profile.uid === profile.uid) return -1;
+        if (b.profile.uid === profile.uid) return 1;
+        if (a.isFinished !== b.isFinished) return a.isFinished ? -1 : 1;
+        if (a.isTaking !== b.isTaking) return a.isTaking ? -1 : 1;
+        return a.profile.displayName.localeCompare(b.profile.displayName);
+      });
+  }, [activeStandbySession, allProfiles, nowMs, records, profile.uid]);
+
+  const standbyStillTakingCount = standbyPeers.filter((p) => p.isTaking).length;
+  const standbyFinishedCount = standbyPeers.filter((p) => p.isFinished).length;
+  const standbyWaitingForOthers = Boolean(activeStandbySession && standbyStillTakingCount > 0);
+
+  const isStudentNavigationLocked = Boolean(
+    profile.role === 'student' &&
+      (isUnfinishedStudentQuiz || isLockedInForcedClassQuiz || standbyWaitingForOthers)
+  );
+
+  useEffect(() => {
+    onQuizLockChange?.(isStudentNavigationLocked);
+    return () => {
+      onQuizLockChange?.(false);
+    };
+  }, [isStudentNavigationLocked, onQuizLockChange]);
 
   // Teacher Monitor Data for active quiz room
   const roomStudents = useMemo(() => {
@@ -567,35 +657,30 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
         <div className="mt-6 p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-xs text-[#4D6354] space-y-1.5">
           <p className="font-bold text-[#172A1E]">Waiting for Teacher Permission</p>
           <p>
-            An alarm and notification were sent to your Teacher Monitor. Answered questions remain permanently locked so you cannot re-answer earlier items, and repeat offenses deduct 15 LorenCoins. You cannot continue until your teacher clicks <strong>Allow Student</strong>.
+            An alarm and notification were sent to your Teacher Monitor. Answered questions remain permanently locked so you cannot re-answer earlier items, and repeat offenses deduct 15 LorenCoins. You cannot continue or leave until your teacher clicks <strong>Allow Student</strong>.
           </p>
         </div>
-        {!isLockedInForcedClassQuiz && (
-          <button
-            type="button"
-            onClick={exitGame}
-            className="mt-6 px-5 py-2.5 rounded-xl border border-[#D8D0BC] text-xs font-semibold text-[#4D6354] hover:bg-[#FAF8F2] cursor-pointer"
-          >
-            Return to Lobby (Lock stays active)
-          </button>
-        )}
       </div>
     );
   }
 
-  // Active Game Arena (Students Play; Teachers Monitor-Only except Catch the Duck Recitation Host)
+  // Active Game Arena (Students Play; Teachers Monitor-Only across ALL 12 games)
   if (activeGameId && activeGameMeta && selectedDeck) {
-    const showTeacherMonitorOnly = isFaculty && activeGameId !== 'catch_the_duck';
+    const showTeacherMonitorOnly = isFaculty;
 
     return (
       <div className="space-y-5">
         {/* Game Arena Top Utility Bar */}
         <div className="bg-white rounded-2xl border border-[#E5DEC9] px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            {isLockedInForcedClassQuiz && !gameResult ? (
+            {isUnfinishedStudentQuiz || standbyWaitingForOthers ? (
               <span
                 className="p-2 rounded-xl border border-[#EA7A26]/40 bg-[#FFF8F1] text-[#C65B10]"
-                title="Locked inside live classroom quiz until you finish or your teacher ends it"
+                title={
+                  standbyWaitingForOthers
+                    ? 'Standing by until classmates finish the live quiz'
+                    : 'Locked inside quiz until you finish all questions'
+                }
               >
                 <Lock className="w-4 h-4" />
               </span>
@@ -688,8 +773,36 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
           </div>
         </div>
 
-        {/* Teacher Monitor-Only Console (Teacher never has to answer quiz questions) */}
-        {showTeacherMonitorOnly ? (
+        {/* Teacher Monitor-Only Console (Teachers never play — only monitor students taking selected quiz) */}
+        {showTeacherMonitorOnly ? (() => {
+          const sessionStartMs = activeTeacherBroadcast
+            ? timestampToMillis(activeTeacherBroadcast.startedAt)
+            : 0;
+          const monitoredRows = roomStudents.map((st) => {
+            const presence = getStudentPresence(st, nowMs);
+            const latestMatch = records.find(
+              (r) =>
+                r.studentId === st.uid &&
+                r.gameId === activeGameId &&
+                r.deckId === selectedDeck.id &&
+                (!sessionStartMs || timestampToMillis(r.createdAt) >= sessionStartMs - 5000)
+            );
+            const matchingAlert = alerts.find(
+              (a) => a.studentId === st.uid && a.status === 'locked'
+            );
+            const isInsideGame =
+              presence.isOnline && st.activeGame === `Playing: ${activeGameMeta.title}`;
+            return { st, presence, latestMatch, matchingAlert, isInsideGame };
+          });
+          const takingCount = monitoredRows.filter((r) => !r.st.lockedOut && !r.latestMatch && r.isInsideGame).length;
+          const finishedCount = monitoredRows.filter((r) => Boolean(r.latestMatch)).length;
+          const lockedCount = monitoredRows.filter((r) => r.st.lockedOut).length;
+          const waitingOrOfflineCount = Math.max(
+            0,
+            monitoredRows.length - takingCount - finishedCount - lockedCount
+          );
+
+          return (
           <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-6">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#ECE7D8]">
               <div>
@@ -701,7 +814,7 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                   Students Taking {activeGameMeta.title}
                 </h3>
                 <p className="text-xs text-[#4D6354] mt-0.5">
-                  Teachers monitor real-time student progress and anti-cheat focus here without answering questions. Enrolled students remain locked inside this quiz until they finish or you click End Live Quiz.
+                  Monitor-only mode: track which students are actively taking your selected quiz, standing by after finishing, or flagged by Anti-Cheat — no teacher gameplay required.
                 </p>
               </div>
               {!activeTeacherBroadcast && onStartClassroomSession && (
@@ -719,6 +832,25 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
               )}
             </div>
 
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 tabular-nums">
+              <div className="p-3.5 rounded-2xl bg-[#FFF8F1] border border-[#EA7A26]/30">
+                <p className="text-[11px] font-semibold text-[#C65B10]">Taking Selected Quiz</p>
+                <p className="text-2xl font-extrabold text-[#172A1E] mt-0.5">{takingCount}</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200">
+                <p className="text-[11px] font-semibold text-[#1E5B3A]">Finished · Standby</p>
+                <p className="text-2xl font-extrabold text-[#1E5B3A] mt-0.5">{finishedCount}</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9]">
+                <p className="text-[11px] font-semibold text-[#4D6354]">Not Started / Offline</p>
+                <p className="text-2xl font-extrabold text-[#172A1E] mt-0.5">{waitingOrOfflineCount}</p>
+              </div>
+              <div className={`p-3.5 rounded-2xl border ${lockedCount > 0 ? 'bg-red-50 border-red-300' : 'bg-[#FAF8F2] border-[#E5DEC9]'}`}>
+                <p className={`text-[11px] font-semibold ${lockedCount > 0 ? 'text-red-700' : 'text-[#4D6354]'}`}>Anti-Cheat Locked</p>
+                <p className={`text-2xl font-extrabold mt-0.5 ${lockedCount > 0 ? 'text-red-700' : 'text-[#172A1E]'}`}>{lockedCount}</p>
+              </div>
+            </div>
+
             {roomStudents.length === 0 ? (
               <p className="text-sm text-[#4D6354] py-8 text-center bg-[#FAF8F2] rounded-2xl">
                 No students enrolled in {activeTeacherBroadcast?.section || broadcastSection} yet.
@@ -729,86 +861,69 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                   <thead>
                     <tr className="border-b border-[#ECE7D8] text-xs text-[#4D6354]">
                       <th className="py-2.5 pr-4 font-semibold">Student</th>
-                      <th className="py-2.5 pr-4 font-semibold">Quiz Status</th>
+                      <th className="py-2.5 pr-4 font-semibold">Selected Quiz Status</th>
                       <th className="py-2.5 pr-4 font-semibold">Latest Attempt</th>
                       <th className="py-2.5 font-semibold text-right">Integrity / Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#F2EFE6]">
-                    {roomStudents.map((st) => {
-                      const presence = getStudentPresence(st);
-                      const sessionStartMs = activeTeacherBroadcast
-                        ? timestampToMillis(activeTeacherBroadcast.startedAt)
-                        : 0;
-                      const latestMatch = records.find(
-                        (r) =>
-                          r.studentId === st.uid &&
-                          r.gameId === activeGameId &&
-                          r.deckId === selectedDeck.id &&
-                          (!sessionStartMs || timestampToMillis(r.createdAt) >= sessionStartMs - 5000)
-                      );
-                      const matchingAlert = alerts.find(
-                        (a) => a.studentId === st.uid && a.status === 'locked'
-                      );
-                      const isInsideGame =
-                        presence.isOnline && st.activeGame === `Playing: ${activeGameMeta.title}`;
-
-                      return (
-                        <tr key={st.uid}>
-                          <td className="py-3 pr-4 font-semibold text-[#172A1E]">
-                            {st.displayName}
-                          </td>
-                          <td className="py-3 pr-4 text-xs">
-                            {st.lockedOut ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-50 border border-red-200 text-red-700 font-bold">
-                                Locked (Integrity)
-                              </span>
-                            ) : latestMatch ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-[#1E5B3A] font-bold">
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                Completed
-                              </span>
-                            ) : isInsideGame ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#EA7A26]/15 border border-[#EA7A26]/30 text-[#C65B10] font-bold">
-                                <Radio className="w-3 h-3 animate-pulse" />
-                                Taking Quiz
-                              </span>
-                            ) : presence.isOnline ? (
-                              <span className="text-[#4D6354] font-medium">Entering Quiz...</span>
-                            ) : (
-                              <span className="text-[#94A398]">Offline</span>
-                            )}
-                          </td>
-                          <td className="py-3 pr-4 text-xs tabular-nums">
-                            {latestMatch ? (
-                              <span className="font-bold text-[#1E5B3A]">
-                                {latestMatch.score} pts ({latestMatch.correctCount}/{latestMatch.totalCount})
-                              </span>
-                            ) : (
-                              <span className="text-[#4D6354]">—</span>
-                            )}
-                          </td>
-                          <td className="py-3 text-right">
-                            {st.lockedOut && matchingAlert && onAllowStudent ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  soundFx.playCorrect();
-                                  void onAllowStudent(matchingAlert);
-                                }}
-                                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer"
-                              >
-                                Allow Student
-                              </button>
-                            ) : (
-                              <span className="text-xs font-semibold text-[#1E5B3A]">
-                                {st.lockedOut ? 'Locked' : 'Focused'}
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {monitoredRows.map(({ st, presence, latestMatch, matchingAlert, isInsideGame }) => (
+                      <tr key={st.uid}>
+                        <td className="py-3 pr-4 font-semibold text-[#172A1E]">
+                          {st.displayName}
+                        </td>
+                        <td className="py-3 pr-4 text-xs">
+                          {st.lockedOut ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-50 border border-red-200 text-red-700 font-bold">
+                              Locked (Integrity)
+                            </span>
+                          ) : latestMatch ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-[#1E5B3A] font-bold">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              Finished · Standing By
+                            </span>
+                          ) : isInsideGame ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#EA7A26]/15 border border-[#EA7A26]/30 text-[#C65B10] font-bold">
+                              <Radio className="w-3 h-3 animate-pulse" />
+                              Taking Selected Quiz
+                            </span>
+                          ) : presence.isOnline ? (
+                            <span className="text-[#4D6354] font-medium">
+                              {activeTeacherBroadcast ? 'Entering Selected Quiz...' : `Online (${st.activeGame || 'Lobby'})`}
+                            </span>
+                          ) : (
+                            <span className="text-[#94A398]">Offline</span>
+                          )}
+                        </td>
+                        <td className="py-3 pr-4 text-xs tabular-nums">
+                          {latestMatch ? (
+                            <span className="font-bold text-[#1E5B3A]">
+                              {latestMatch.score} pts ({latestMatch.correctCount}/{latestMatch.totalCount})
+                            </span>
+                          ) : (
+                            <span className="text-[#4D6354]">—</span>
+                          )}
+                        </td>
+                        <td className="py-3 text-right">
+                          {st.lockedOut && matchingAlert && onAllowStudent ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                soundFx.playCorrect();
+                                void onAllowStudent(matchingAlert);
+                              }}
+                              className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer"
+                            >
+                              Allow Student
+                            </button>
+                          ) : (
+                            <span className="text-xs font-semibold text-[#1E5B3A]">
+                              {st.lockedOut ? 'Locked' : 'Focused'}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -842,7 +957,8 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
               )}
             </div>
           </div>
-        ) : (
+          );
+        })() : (
           /* Student Quiz Arena OR Teacher Catch-the-Duck Recitation Host */
           <div
             className={`bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 ${
@@ -850,12 +966,14 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
             }`}
           >
             {gameResult ? (
-              <div className="max-w-md mx-auto text-center space-y-5 py-4">
+              <div className="max-w-lg mx-auto text-center space-y-5 py-4">
                 <div className="w-16 h-16 rounded-2xl bg-amber-50 text-[#EA7A26] flex items-center justify-center mx-auto">
                   <Trophy className="w-8 h-8" />
                 </div>
                 <div>
-                  <p className="text-xs font-bold text-[#EA7A26]">Round Completed</p>
+                  <p className="text-xs font-bold text-[#EA7A26]">
+                    {standbyWaitingForOthers ? 'Quiz Finished · Standing By' : 'Round Completed'}
+                  </p>
                   <h3 className="text-2xl font-extrabold text-[#172A1E] mt-1">
                     {activeGameMeta.title} Results
                   </h3>
@@ -916,6 +1034,60 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                   </div>
                 </div>
 
+                {completedFromLiveSession && activeStandbySession && (
+                  <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-left space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-bold text-[#1E5B3A] flex items-center gap-1.5">
+                          <Clock className="w-4 h-4 text-[#EA7A26]" />
+                          {standbyWaitingForOthers
+                            ? `Standby Waiting Room · Waiting for ${standbyStillTakingCount} classmate${standbyStillTakingCount > 1 ? 's' : ''} to finish`
+                            : 'All Active Classmates Have Finished!'}
+                        </p>
+                        <p className="text-[11px] text-[#4D6354] mt-0.5">
+                          {activeStandbySession.section} · {standbyFinishedCount} of {standbyPeers.length} finished
+                        </p>
+                      </div>
+                      <span className="text-[11px] font-bold text-[#EA7A26] tabular-nums">
+                        {standbyStillTakingCount} still taking
+                      </span>
+                    </div>
+
+                    {standbyPeers.length > 0 && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto">
+                        {standbyPeers.map((peer) => (
+                          <div
+                            key={peer.profile.uid}
+                            className="px-3 py-2 rounded-xl bg-white border border-[#E5DEC9] flex items-center justify-between gap-2 text-xs"
+                          >
+                            <span className="font-semibold text-[#172A1E] truncate">
+                              {peer.profile.displayName}
+                              {peer.profile.uid === profile.uid ? ' (You)' : ''}
+                            </span>
+                            <span
+                              className={`text-[11px] font-bold shrink-0 ${
+                                peer.isFinished
+                                  ? 'text-[#1E5B3A]'
+                                  : peer.isTaking
+                                    ? 'text-[#C65B10]'
+                                    : 'text-[#94A398]'
+                              }`}
+                            >
+                              {peer.isFinished
+                                ? 'Finished'
+                                : peer.isTaking
+                                  ? 'Taking Quiz...'
+                                  : peer.isOnline
+                                    ? 'Standby'
+                                    : 'Offline'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-center gap-3 pt-2">
                   {!completedFromLiveSession && (
                     <button
@@ -927,13 +1099,20 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                       Play Again
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={exitGame}
-                    className="px-5 py-2.5 rounded-xl border border-[#D8D0BC] text-xs font-bold text-[#172A1E] hover:bg-[#FAF8F2] cursor-pointer"
-                  >
-                    {completedFromLiveSession ? 'Return to Quiz Lobby' : 'Choose Another Game'}
-                  </button>
+                  {standbyWaitingForOthers ? (
+                    <span className="px-5 py-2.5 rounded-xl bg-[#FAF8F2] border border-[#EA7A26]/40 text-xs font-bold text-[#C65B10] inline-flex items-center gap-2">
+                      <Clock className="w-4 h-4" />
+                      Standing By for Classmates...
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={exitGame}
+                      className="px-5 py-2.5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold cursor-pointer"
+                    >
+                      {completedFromLiveSession ? 'Return to Quiz Lobby' : 'Choose Another Game'}
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1066,14 +1245,16 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
       <div className="bg-white rounded-3xl border border-[#E5DEC9] p-6 sm:p-8 space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
           <div>
-            <p className="text-xs font-semibold text-[#EA7A26]">Customizable Quiz Arena</p>
+            <p className="text-xs font-semibold text-[#EA7A26]">
+              {isFaculty ? 'Classroom Quiz Launcher & Monitor' : 'Customizable Quiz Arena'}
+            </p>
             <h2 className="text-2xl font-bold text-[#172A1E] flex items-center gap-2 mt-0.5">
               <Gamepad2 className="w-6 h-6 text-[#1E5B3A]" />
               12 Interactive Mini-Games
             </h2>
             <p className="text-xs text-[#4D6354] mt-1">
               {isFaculty
-                ? 'Select any subject deck below and launch a live classroom session to monitor your students in real time.'
+                ? 'Select any subject deck below and click Start & Monitor on a quiz mode to launch it for your students and monitor them in real time — teachers do not need to play.'
                 : 'Select any subject deck below — including custom & PowerPoint-imported teacher quizzes — then launch a game.'}
             </p>
           </div>
@@ -1191,15 +1372,18 @@ export const MiniGamesHub: React.FC<MiniGamesHubProps> = ({
                   onClick={() => startGame(game.id)}
                   className="px-4 py-2 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
                 >
-                  {isFaculty && game.id !== 'catch_the_duck' ? (
+                  {isFaculty ? (
                     <>
                       <Eye className="w-3.5 h-3.5" />
-                      Monitor
+                      {activeTeacherBroadcast?.gameId === game.id &&
+                      activeTeacherBroadcast?.deckId === selectedDeck?.id
+                        ? 'Open Live Monitor'
+                        : 'Start & Monitor'}
                     </>
                   ) : (
                     <>
                       <Play className="w-3.5 h-3.5" />
-                      {isFaculty ? 'Host' : 'Play'}
+                      Play
                     </>
                   )}
                 </button>
