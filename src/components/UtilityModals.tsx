@@ -45,6 +45,7 @@ interface UtilityToolbarProps {
   role: UserRole;
   section?: string;
   lockedAlertCount: number;
+  quizLocked?: boolean;
 }
 
 export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
@@ -58,6 +59,7 @@ export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
   role,
   section,
   lockedAlertCount,
+  quizLocked = false,
 }) => {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 py-2.5 px-4 bg-[var(--lz-surface)] rounded-2xl border border-[var(--lz-border)]">
@@ -158,6 +160,15 @@ export const UtilityToolbar: React.FC<UtilityToolbarProps> = ({
             <span className="font-bold text-red-600 tabular-nums">{lockedAlertCount} Focus Alert</span>
           </>
         )}
+        {quizLocked && (
+          <>
+            <span aria-hidden="true">·</span>
+            <span className="inline-flex items-center gap-1 font-bold text-[#C65B10]">
+              <Lock className="w-3 h-3" />
+              Live Quiz Locked
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -198,15 +209,15 @@ export const InstructionsModal: React.FC<{ onClose: () => void }> = ({ onClose }
         </p>
       </div>
       <div>
-        <h4 className="font-bold text-[#172A1E]">2. Play 11 Customizable Quiz Games</h4>
+        <h4 className="font-bold text-[#172A1E]">2. Play 12 Customizable Quiz Games</h4>
         <p className="text-xs mt-1">
-          Pick any subject or teacher-imported PowerPoint deck to earn LorenCoins and unlock SLA uniforms and accessories.
+          Pick any subject or teacher-imported PowerPoint deck to earn LorenCoins and unlock SLA uniforms and accessories. Once you submit an answer, you cannot go back to change it.
         </p>
       </div>
       <div>
-        <h4 className="font-bold text-[#172A1E]">3. Integrity Guard (Anti-Cheating)</h4>
+        <h4 className="font-bold text-[#172A1E]">3. Integrity Guard &amp; Live Classroom Lock</h4>
         <p className="text-xs mt-1">
-          Leaving the quiz tab or app window during an active round triggers an alert sound on the Teacher Monitor and locks answering until your teacher allows you back.
+          When your teacher starts a live class quiz, your screen stays locked inside the quiz until you finish or your teacher ends it. Leaving the tab triggers an alert on the Teacher Monitor.
         </p>
       </div>
     </div>
@@ -214,19 +225,20 @@ export const InstructionsModal: React.FC<{ onClose: () => void }> = ({ onClose }
 );
 
 export const GameRulesModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
-  <BaseModal title="All 11 Quiz Game Rules" onClose={onClose}>
+  <BaseModal title="All 12 Quiz Game Rules" onClose={onClose}>
     <div className="space-y-2.5 text-xs text-[#4D6354] leading-relaxed">
       <p><strong className="text-[#EA7A26]">1. Lorenscape:</strong> Tap or type letters from the tray to spell the exact answer.</p>
-      <p><strong className="text-[#EA7A26]">2. On the Run:</strong> Sprint across the SLA track by answering recitation questions quickly.</p>
-      <p><strong className="text-[#EA7A26]">3. Brainzone:</strong> Type identification answers before the 60s timer ends to elevate your platform.</p>
-      <p><strong className="text-[#EA7A26]">4. Grab It:</strong> Answer accurately to earn +25 points or steal +25 points from a rival.</p>
-      <p><strong className="text-[#EA7A26]">5. Catch the Duck:</strong> Teachers pick mystery ducks for student recitation; students play solo pond rounds.</p>
-      <p><strong className="text-[#1E5B3A]">6. Word Quest:</strong> Unscramble the shuffled letter tiles to spell the lesson term.</p>
-      <p><strong className="text-[#1E5B3A]">7. Math Dash:</strong> Solve rapid arithmetic &amp; numeric problems with combo streaks before time expires.</p>
-      <p><strong className="text-[#1E5B3A]">8. Quiz Master:</strong> Classic 4-choice mastery quiz with instant right/wrong feedback.</p>
+      <p><strong className="text-[#EA7A26]">2. On the Run:</strong> Sprint your pet across the solo SLA speed track by answering accurately with no NPC bots.</p>
+      <p><strong className="text-[#EA7A26]">3. Brainzone:</strong> Type identification or enumeration answers before the timer ends to elevate your platform.</p>
+      <p><strong className="text-[#EA7A26]">4. Grab It:</strong> Answer right to unlock Mystery Bonus Chests and stack extra round points.</p>
+      <p><strong className="text-[#EA7A26]">5. Catch the Duck:</strong> Teachers pick mystery ducks for student recitation; students play solo mystery-duck pond rounds.</p>
+      <p><strong className="text-[#1E5B3A]">6. Word Quest:</strong> Unscramble scattered letter tiles to build the lesson term.</p>
+      <p><strong className="text-[#1E5B3A]">7. Math Dash:</strong> Solve fresh randomized arithmetic &amp; numeric problems with combo streaks.</p>
+      <p><strong className="text-[#1E5B3A]">8. Quiz Master:</strong> Classic 4-choice &amp; enumeration mastery quiz with instant feedback.</p>
       <p><strong className="text-[#1E5B3A]">9. Memory Match:</strong> Flip cards to pair each lesson clue with its matching answer.</p>
       <p><strong className="text-[#1E5B3A]">10. Sorting Squad:</strong> Classify terms into the correct subject category bins.</p>
       <p><strong className="text-[#1E5B3A]">11. Quick Recall:</strong> Rapid True/False blitz — judge whether each proposed answer matches the clue.</p>
+      <p><strong className="text-[#EA7A26]">12. 4 Pics 1 Word:</strong> Inspect 4 to 6 visual illustration scenes (hard mode hides captions until Hint) to deduce the hidden concept word.</p>
     </div>
   </BaseModal>
 );
@@ -244,6 +256,7 @@ export const SettingsModal: React.FC<{
   onClaimRoleWithCode: (targetRole: 'teacher' | 'admin', accessCode: string) => Promise<void>;
   onSignOut: () => Promise<void>;
   onClose: () => void;
+  quizLocked?: boolean;
 }> = ({
   profile,
   email,
@@ -257,6 +270,7 @@ export const SettingsModal: React.FC<{
   onClaimRoleWithCode,
   onSignOut,
   onClose,
+  quizLocked = false,
 }) => {
   const currentStudentSec = (profile.section || '').trim();
   const initialSec = currentStudentSec || SLA_SECTIONS[6];
@@ -677,11 +691,13 @@ export const SettingsModal: React.FC<{
 
         <button
           type="button"
+          disabled={quizLocked}
           onClick={() => void onSignOut()}
-          className="w-full py-2.5 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+          className="w-full py-2.5 rounded-xl border border-red-200 text-red-700 hover:bg-red-50 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          title={quizLocked ? 'Finish your active live classroom quiz before signing out.' : undefined}
         >
           <LogOut className="w-4 h-4" />
-          Sign Out of Google Account
+          {quizLocked ? 'Sign Out Locked During Live Classroom Quiz' : 'Sign Out of Google Account'}
         </button>
       </div>
     </BaseModal>

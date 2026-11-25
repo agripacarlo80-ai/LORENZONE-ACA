@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowUp,
   CheckCircle2,
   Clock,
   Flag,
+  Flame,
   HelpCircle,
+  Lock,
+  Package,
   RotateCcw,
-  Swords,
-  ArrowUp,
   Sparkles,
   Trash2,
 } from 'lucide-react';
@@ -28,10 +30,20 @@ export interface GameSessionResult {
   summaryNote?: string;
 }
 
+export interface GameRoundProgress {
+  idx: number;
+  score: number;
+  correctCount: number;
+  answeredCount?: number;
+  extra?: Record<string, unknown>;
+}
+
 interface CommonGameProps {
   questions: QuizQuestion[];
   profile: PublicProfile;
   allProfiles: PublicProfile[];
+  savedProgress?: GameRoundProgress | null;
+  onSaveProgress?: (progress: GameRoundProgress) => void;
   onComplete: (result: GameSessionResult) => void;
   onAwardStudent?: (studentUid: string, points: number) => Promise<void>;
 }
@@ -76,13 +88,39 @@ const EmptyDeckNotice: React.FC = () => (
 /* =========================================================
    1. LORENSCAPE (Guess answer from given letter tray)
    ========================================================= */
-export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, onComplete }) => {
-  const [idx, setIdx] = useState(0);
+export const LorenscapeGame: React.FC<CommonGameProps> = ({
+  questions,
+  profile,
+  savedProgress,
+  onSaveProgress,
+  onComplete,
+}) => {
+  const playableQuestions = useMemo(
+    () =>
+      questions.filter((q) => {
+        const candidate =
+          q.questionType === 'enumeration' && q.enumerationItems && q.enumerationItems.length > 0
+            ? q.enumerationItems[0]
+            : q.answer;
+        return candidate.toUpperCase().replace(/[^A-Z0-9]/g, '').length >= 2;
+      }),
+    [questions]
+  );
+
+  const isAlreadyFinished = Boolean(
+    savedProgress && playableQuestions.length > 0 && savedProgress.idx >= playableQuestions.length
+  );
+
+  const initialIdx = savedProgress
+    ? Math.min(Math.max(0, savedProgress.idx), Math.max(0, playableQuestions.length - 1))
+    : 0;
+
+  const [idx, setIdx] = useState(initialIdx);
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
   const [showHint, setShowHint] = useState(false);
   const [feedback, setFeedback] = useState<'idle' | 'correct' | 'wrong'>('idle');
-  const [score, setScore] = useState(0);
-  const [correctCount, setCorrectCount] = useState(0);
+  const [score, setScore] = useState(savedProgress?.score || 0);
+  const [correctCount, setCorrectCount] = useState(savedProgress?.correctCount || 0);
   const [startTime] = useState(() => Date.now());
   const timerRef = useRef<number | null>(null);
   const completedRef = useRef(false);
@@ -93,18 +131,34 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
     };
   }, []);
 
-  const q = questions[idx];
-  const targetClean = useMemo(
-    () => (q?.answer || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
-    [q?.answer]
-  );
+  useEffect(() => {
+    if (!isAlreadyFinished || completedRef.current || !savedProgress) return;
+    completedRef.current = true;
+    onComplete({
+      score: savedProgress.score || 0,
+      correctCount: savedProgress.correctCount || 0,
+      totalCount: playableQuestions.length,
+      durationSeconds: 1,
+    });
+  }, [isAlreadyFinished, savedProgress, playableQuestions.length, onComplete]);
+
+  const q = playableQuestions[idx];
+  const targetClean = useMemo(() => {
+    if (!q) return '';
+    const raw =
+      q.questionType === 'enumeration' && q.enumerationItems && q.enumerationItems.length > 0
+        ? q.enumerationItems[0]
+        : q.answer;
+    const cleaned = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return cleaned.length <= 16 ? cleaned : cleaned.slice(0, 16);
+  }, [q]);
 
   const letterTiles = useMemo(() => {
     if (!targetClean) return [];
     const chars = targetClean.split('');
     const isNumericOnly = /^\d+$/.test(targetClean);
-    const pool = isNumericOnly ? '0123456789' : 'AEIOURSTLNM';
-    const decoys = shuffle(pool.split('').filter((c) => !chars.includes(c))).slice(0, 3);
+    const pool = isNumericOnly ? '0123456789' : 'AEIOURSTLNMDPC';
+    const decoys = shuffle(pool.split('').filter((c) => !chars.includes(c))).slice(0, 4);
     return shuffle([...chars, ...decoys].map((char, i) => ({ id: i, char })));
   }, [targetClean, idx]);
 
@@ -140,6 +194,13 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
     const nextCorrect = isRight ? correctCount + 1 : correctCount;
     const nextScore = isRight ? score + (showHint ? 20 : 30) : score;
 
+    // Persist forward-only step immediately so the student cannot re-answer this question
+    onSaveProgress?.({
+      idx: idx + 1,
+      score: nextScore,
+      correctCount: nextCorrect,
+    });
+
     if (isRight) {
       soundFx.playCorrect();
       setFeedback('correct');
@@ -151,13 +212,13 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
     }
 
     timerRef.current = window.setTimeout(() => {
-      if (idx + 1 >= questions.length) {
+      if (idx + 1 >= playableQuestions.length) {
         if (completedRef.current) return;
         completedRef.current = true;
         onComplete({
           score: nextScore,
           correctCount: nextCorrect,
-          totalCount: questions.length,
+          totalCount: playableQuestions.length,
           durationSeconds: Math.max(1, Math.round((Date.now() - startTime) / 1000)),
         });
       } else {
@@ -175,8 +236,9 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
     correctCount,
     score,
     showHint,
+    onSaveProgress,
     idx,
-    questions.length,
+    playableQuestions.length,
     onComplete,
     startTime,
   ]);
@@ -210,15 +272,33 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
     return () => window.removeEventListener('keydown', onKey);
   }, [q, feedback, letterTiles, selectedIndices, handlePickTile, handleRemoveLast, handleSubmit]);
 
+  if (isAlreadyFinished) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-sm font-semibold text-[#1E5B3A]">
+        Finalizing your locked answers...
+      </div>
+    );
+  }
+
   if (!q || !targetClean) {
     return <EmptyDeckNotice />;
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between text-xs font-semibold text-[#4D6354] tabular-nums">
-        <span>Question {idx + 1} of {questions.length}</span>
-        <span className="text-[#1E5B3A]">Score: {score} pts</span>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-xs font-semibold text-[#4D6354] tabular-nums">
+          <span>
+            Lorenscape · Question {idx + 1} of {playableQuestions.length}
+          </span>
+          <span className="text-[#1E5B3A] font-bold">Score: {score} pts</span>
+        </div>
+        <div className="h-2 rounded-full bg-[#ECE7D8] overflow-hidden">
+          <div
+            className="h-full bg-[#1E5B3A] transition-all duration-300"
+            style={{ width: `${Math.round(((idx + (feedback !== 'idle' ? 1 : 0)) / playableQuestions.length) * 100)}%` }}
+          />
+        </div>
       </div>
 
       {/* Question Prompt */}
@@ -239,20 +319,21 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
             <button
               key={slotIdx}
               type="button"
+              disabled={feedback !== 'idle'}
               onClick={() => {
                 if (tileIdx !== undefined && feedback === 'idle') {
                   soundFx.playClick();
                   setSelectedIndices((prev) => prev.filter((_, i) => i !== slotIdx));
                 }
               }}
-              className={`w-11 h-12 rounded-xl border-2 text-lg font-extrabold flex items-center justify-center transition-colors cursor-pointer ${
+              className={`w-10 h-11 sm:w-11 sm:h-12 rounded-xl border-2 text-lg font-extrabold flex items-center justify-center transition-colors ${
                 feedback === 'correct'
-                  ? 'border-[#2E7D32] bg-emerald-50 text-[#1E5B3A]'
+                  ? 'border-[#2E7D32] bg-emerald-50 text-[#1E5B3A] cursor-default'
                   : feedback === 'wrong'
-                  ? 'border-red-400 bg-red-50 text-red-700'
+                  ? 'border-red-400 bg-red-50 text-red-700 cursor-default'
                   : ch
-                  ? 'border-[#1E5B3A] bg-white text-[#172A1E]'
-                  : 'border-dashed border-[#D4CCB5] bg-[#FAF8F2] text-[#94A398]'
+                  ? 'border-[#1E5B3A] bg-white text-[#172A1E] cursor-pointer'
+                  : 'border-dashed border-[#D4CCB5] bg-[#FAF8F2] text-[#94A398] cursor-default'
               }`}
             >
               {ch}
@@ -262,7 +343,7 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
       </div>
 
       {/* Given Letter Tray */}
-      <div className="flex flex-wrap items-center justify-center gap-2.5 max-w-md mx-auto">
+      <div className="flex flex-wrap items-center justify-center gap-2.5 max-w-lg mx-auto">
         {letterTiles.map((tile, tIdx) => {
           const used = selectedIndices.includes(tIdx);
           return (
@@ -271,10 +352,10 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
               type="button"
               disabled={used || feedback !== 'idle'}
               onClick={() => handlePickTile(tIdx)}
-              className={`w-12 h-12 rounded-full font-extrabold text-base border-2 transition-transform cursor-pointer ${
-                used
+              className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full font-extrabold text-base border-2 transition-transform ${
+                used || feedback !== 'idle'
                   ? 'opacity-25 border-[#E5DEC9] bg-[#FAF8F2] scale-95 cursor-default'
-                  : 'border-[#EA7A26] bg-[#FFF8F1] text-[#C65B10] hover:scale-105 active:scale-95'
+                  : 'border-[#EA7A26] bg-[#FFF8F1] text-[#C65B10] hover:scale-105 active:scale-95 cursor-pointer'
               }`}
             >
               {tile.char}
@@ -294,12 +375,18 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
             role={profile.role}
             size={56}
           />
-          <span className="text-xs text-[#4D6354]">
-            {feedback === 'correct'
-              ? 'Spot on! Keep going!'
-              : feedback === 'wrong'
-              ? `Answer was ${targetClean}`
-              : 'Tap or type the letters to build the answer.'}
+          <span className="text-xs font-medium text-[#4D6354]">
+            {feedback === 'correct' ? (
+              <span className="text-[#1E5B3A] font-bold inline-flex items-center gap-1">
+                <Lock className="w-3.5 h-3.5" /> Answer Locked · Spot on!
+              </span>
+            ) : feedback === 'wrong' ? (
+              <span className="text-red-700 font-bold inline-flex items-center gap-1">
+                <Lock className="w-3.5 h-3.5" /> Answer Locked · Correct term was {targetClean}
+              </span>
+            ) : (
+              'Tap or type the letters to build the answer (answers lock once submitted).'
+            )}
           </span>
         </div>
 
@@ -349,45 +436,34 @@ export const LorenscapeGame: React.FC<CommonGameProps> = ({ questions, profile, 
 };
 
 /* =========================================================
-   2. ON THE RUN (Student / Duck Race to Finish Line)
+   2. ON THE RUN (Solo Speed Track & Checkpoint Sprint — NPC-free)
    ========================================================= */
 export const OnTheRunGame: React.FC<CommonGameProps> = ({
   questions,
   profile,
-  allProfiles,
+  savedProgress,
+  onSaveProgress,
   onComplete,
 }) => {
-  const [idx, setIdx] = useState(0);
-  const [playerPos, setPlayerPos] = useState(0);
-  const [rivals, setRivals] = useState(() => {
-    const peers = allProfiles
-      .filter((p) => p.uid !== profile.uid)
-      .slice(0, 3);
-    const defaults = [
-      { id: 'r1', name: 'Mika', species: 'bunny' as const, color: '#FBF7F0', pos: 8 },
-      { id: 'r2', name: 'Jules', species: 'dog' as const, color: '#E5AE74', pos: 6 },
-      { id: 'r3', name: 'Tala', species: 'turtle' as const, color: '#76B964', pos: 5 },
-    ];
-    return defaults.map((d, i) =>
-      peers[i]
-        ? {
-            id: peers[i].uid,
-            name: peers[i].displayName.split(' ')[0],
-            species: peers[i].petSpecies,
-            color: peers[i].petColor,
-            pos: 5,
-          }
-        : d
-    );
-  });
+  const isAlreadyFinished = Boolean(
+    savedProgress && questions.length > 0 && savedProgress.idx >= questions.length
+  );
 
-  const [score, setScore] = useState(0);
-  const [correctCount, setCorrectCount] = useState(0);
+  const initialIdx = savedProgress
+    ? Math.min(Math.max(0, savedProgress.idx), Math.max(0, questions.length - 1))
+    : 0;
+  const savedStreak =
+    savedProgress?.extra && typeof savedProgress.extra.streak === 'number'
+      ? savedProgress.extra.streak
+      : 0;
+
+  const [idx, setIdx] = useState(initialIdx);
+  const [score, setScore] = useState(savedProgress?.score || 0);
+  const [correctCount, setCorrectCount] = useState(savedProgress?.correctCount || 0);
+  const [streak, setStreak] = useState(savedStreak);
   const [lockedChoice, setLockedChoice] = useState<string | null>(null);
   const [startTime] = useState(() => Date.now());
 
-  const rivalsRef = useRef(rivals);
-  rivalsRef.current = rivals;
   const completedRef = useRef(false);
   const timeoutRef = useRef<number | null>(null);
 
@@ -397,90 +473,145 @@ export const OnTheRunGame: React.FC<CommonGameProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (!isAlreadyFinished || completedRef.current || !savedProgress) return;
+    completedRef.current = true;
+    const savedCorrect = savedProgress.correctCount || 0;
+    const finishBonus = savedCorrect === questions.length ? 40 : savedCorrect > 0 ? 15 : 0;
+    onComplete({
+      score: (savedProgress.score || 0) + finishBonus,
+      correctCount: savedCorrect,
+      totalCount: questions.length,
+      durationSeconds: 1,
+      summaryNote:
+        savedCorrect === questions.length
+          ? 'Perfect Solo Sprint to the Finish Line!'
+          : `Cleared ${savedCorrect} of ${questions.length} track gates!`,
+    });
+  }, [isAlreadyFinished, savedProgress, questions.length, onComplete]);
+
   const q = questions[idx];
   const displayOptions = useMemo(() => (q ? normalizeOptions(q) : []), [q]);
-  const stepGain = Math.ceil(100 / Math.max(3, questions.length));
+  const playerPos =
+    questions.length > 0
+      ? Math.min(100, Math.round((correctCount / questions.length) * 100))
+      : 0;
 
-  // Gentle rival pacing every 3.5 seconds while race is active
+  const handleAnswer = useCallback(
+    (opt: string) => {
+      if (lockedChoice || completedRef.current || !q) return;
+      setLockedChoice(opt);
+      const isRight = opt.trim().toUpperCase() === q.answer.trim().toUpperCase();
+
+      const nextStreak = isRight ? streak + 1 : 0;
+      const streakBonus = isRight && nextStreak >= 2 ? Math.min(20, nextStreak * 5) : 0;
+      const nextCorrect = isRight ? correctCount + 1 : correctCount;
+      const nextScore = isRight ? score + 35 + streakBonus : score;
+
+      setStreak(nextStreak);
+      if (isRight) {
+        soundFx.playCorrect();
+        setCorrectCount(nextCorrect);
+        setScore(nextScore);
+      } else {
+        soundFx.playWrong();
+      }
+
+      onSaveProgress?.({
+        idx: idx + 1,
+        score: nextScore,
+        correctCount: nextCorrect,
+        extra: { streak: nextStreak },
+      });
+
+      timeoutRef.current = window.setTimeout(() => {
+        if (idx + 1 >= questions.length) {
+          if (completedRef.current) return;
+          completedRef.current = true;
+          const finishBonus = nextCorrect === questions.length ? 40 : nextCorrect > 0 ? 15 : 0;
+          onComplete({
+            score: nextScore + finishBonus,
+            correctCount: nextCorrect,
+            totalCount: questions.length,
+            durationSeconds: Math.max(1, Math.round((Date.now() - startTime) / 1000)),
+            summaryNote:
+              nextCorrect === questions.length
+                ? 'Perfect Solo Sprint to the Finish Line!'
+                : `Cleared ${nextCorrect} of ${questions.length} track gates!`,
+          });
+        } else {
+          setIdx((i) => i + 1);
+          setLockedChoice(null);
+        }
+      }, 850);
+    },
+    [lockedChoice, q, streak, correctCount, score, onSaveProgress, idx, questions.length, onComplete, startTime]
+  );
+
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (completedRef.current) return;
-      setRivals((prev) =>
-        prev.map((r) => ({
-          ...r,
-          pos: Math.min(96, r.pos + Math.floor(Math.random() * 7) + 2),
-        }))
-      );
-    }, 3500);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (!q || lockedChoice) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const num = Number(e.key);
+      if (num >= 1 && num <= displayOptions.length) {
+        e.preventDefault();
+        handleAnswer(displayOptions[num - 1]);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [q, lockedChoice, displayOptions, handleAnswer]);
+
+  if (isAlreadyFinished) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-sm font-semibold text-[#1E5B3A]">
+        Finalizing your locked answers...
+      </div>
+    );
+  }
 
   if (!q) {
     return <EmptyDeckNotice />;
   }
 
-  const handleAnswer = (opt: string) => {
-    if (lockedChoice || completedRef.current) return;
-    setLockedChoice(opt);
-    const isRight = opt.trim().toUpperCase() === q.answer.trim().toUpperCase();
-
-    const nextPos = isRight ? Math.min(100, playerPos + stepGain) : playerPos;
-    const nextCorrect = isRight ? correctCount + 1 : correctCount;
-    const nextScore = isRight ? score + 35 : score;
-
-    if (isRight) {
-      soundFx.playCorrect();
-      setPlayerPos(nextPos);
-      setCorrectCount(nextCorrect);
-      setScore(nextScore);
-    } else {
-      soundFx.playWrong();
-      setRivals((prev) =>
-        prev.map((r, i) => (i === 0 ? { ...r, pos: Math.min(98, r.pos + 8) } : r))
-      );
-    }
-
-    timeoutRef.current = window.setTimeout(() => {
-      if (nextPos >= 100 || idx + 1 >= questions.length) {
-        if (completedRef.current) return;
-        completedRef.current = true;
-        const won = nextPos >= Math.max(...rivalsRef.current.map((r) => r.pos));
-        onComplete({
-          score: nextScore + (won ? 40 : 0),
-          correctCount: nextCorrect,
-          totalCount: idx + 1,
-          durationSeconds: Math.max(1, Math.round((Date.now() - startTime) / 1000)),
-          summaryNote: won ? '1st Place Finish Line Winner!' : 'Completed the SLA Race Track!',
-        });
-      } else {
-        setIdx((i) => i + 1);
-        setLockedChoice(null);
-      }
-    }, 800);
-  };
-
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between text-xs font-semibold text-[#4D6354] tabular-nums">
-        <span>On the Run · Question {idx + 1}/{questions.length}</span>
-        <span className="text-[#1E5B3A]">Race Score: {score} pts</span>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-[#4D6354] tabular-nums">
+        <span>
+          On the Run · Solo Checkpoint {idx + 1}/{questions.length}
+        </span>
+        <div className="flex items-center gap-3">
+          {streak >= 2 && (
+            <span className="text-[#EA7A26] font-bold flex items-center gap-1">
+              <Flame className="w-3.5 h-3.5" /> {streak}x Streak
+            </span>
+          )}
+          <span className="text-[#1E5B3A] font-bold">Sprint Score: {score} pts</span>
+        </div>
       </div>
 
-      {/* Race Track Arena */}
-      <div className="bg-[#EAF4EA] rounded-2xl border border-[#CFE4CF] p-4 space-y-3 relative overflow-hidden">
-        <div className="flex items-center justify-between text-xs font-bold text-[#1E5B3A] mb-1">
+      {/* Solo Checkpoint Speed Track */}
+      <div className="bg-[#EAF4EA] rounded-2xl border border-[#CFE4CF] p-5 space-y-3 relative overflow-hidden">
+        <div className="flex items-center justify-between text-xs font-bold text-[#1E5B3A]">
           <span>START</span>
+          <span>25%</span>
+          <span>50%</span>
+          <span>75%</span>
           <span className="flex items-center gap-1 text-[#EA7A26]">
-            <Flag className="w-3.5 h-3.5" /> FINISH LINE
+            <Flag className="w-3.5 h-3.5" /> FINISH
           </span>
         </div>
 
-        {/* Player Lane */}
-        <div className="relative h-12 bg-white/90 rounded-xl border border-[#1E5B3A]/30 flex items-center px-3">
-          <span className="text-xs font-bold text-[#1E5B3A] z-10">{profile.displayName.split(' ')[0]} (You)</span>
+        <div className="relative h-14 bg-white/95 rounded-xl border border-[#1E5B3A]/30 flex items-center px-3">
+          <div className="absolute inset-x-4 top-1/2 -translate-y-1/2 h-2 rounded-full bg-[#ECE7D8] overflow-hidden">
+            <div
+              className="h-full bg-[#1E5B3A] transition-all duration-500"
+              style={{ width: `${playerPos}%` }}
+            />
+          </div>
           <div
-            className="absolute top-1 transition-all duration-500 animate-runner-hop"
-            style={{ left: `calc(${Math.min(88, playerPos)}%)` }}
+            className="relative z-10 transition-all duration-500 animate-runner-hop flex items-center gap-1.5 bg-white/90 pr-2 py-0.5 rounded-full border border-[#1E5B3A]/20"
+            style={{ marginLeft: `calc(${Math.min(82, Math.max(0, playerPos - 6))}%)` }}
           >
             <PetAvatar
               species={profile.petSpecies}
@@ -488,34 +619,18 @@ export const OnTheRunGame: React.FC<CommonGameProps> = ({
               outfit={profile.outfit}
               accessory={profile.accessory}
               role={profile.role}
-              size={40}
+              size={38}
             />
+            <span className="text-xs font-extrabold text-[#1E5B3A] whitespace-nowrap">
+              {profile.displayName.split(' ')[0]} · {playerPos}%
+            </span>
           </div>
         </div>
-
-        {/* Rival Lanes */}
-        {rivals.map((rival) => (
-          <div key={rival.id} className="relative h-10 bg-white/70 rounded-xl border border-[#D8E2D8] flex items-center px-3">
-            <span className="text-xs font-medium text-[#4D6354] z-10">{rival.name}</span>
-            <div
-              className="absolute top-0.5 transition-all duration-700"
-              style={{ left: `calc(${Math.min(88, rival.pos)}%)` }}
-            >
-              <PetAvatar
-                species={rival.species}
-                color={rival.color}
-                outfit="outfit_sla_polo"
-                accessory="none"
-                size={36}
-              />
-            </div>
-          </div>
-        ))}
       </div>
 
       {/* Question & Fast Answer Choices */}
-      <div className="bg-white rounded-2xl border border-[#E5DEC9] p-5">
-        <h3 className="text-lg font-bold text-[#172A1E] mb-4">{q.prompt}</h3>
+      <div className="bg-white rounded-2xl border border-[#E5DEC9] p-5 space-y-4">
+        <h3 className="text-lg font-bold text-[#172A1E]">{q.prompt}</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {displayOptions.map((opt, optIdx) => {
             const isPicked = lockedChoice === opt;
@@ -526,21 +641,32 @@ export const OnTheRunGame: React.FC<CommonGameProps> = ({
                 type="button"
                 disabled={Boolean(lockedChoice)}
                 onClick={() => handleAnswer(opt)}
-                className={`p-3.5 rounded-xl border text-left text-sm font-semibold transition-colors cursor-pointer ${
+                className={`p-3.5 rounded-xl border text-left text-sm font-semibold transition-colors flex items-center gap-2.5 ${
                   lockedChoice
                     ? isRight
-                      ? 'bg-[#1E5B3A] text-white border-[#1E5B3A]'
+                      ? 'bg-[#1E5B3A] text-white border-[#1E5B3A] cursor-default'
                       : isPicked
-                      ? 'bg-red-50 text-red-700 border-red-300'
-                      : 'bg-[#FAF8F2] text-[#94A398] border-[#E5DEC9]'
-                    : 'bg-[#FAF8F2] hover:bg-[#EA7A26]/10 hover:border-[#EA7A26] border-[#E5DEC9] text-[#172A1E]'
+                      ? 'bg-red-50 text-red-700 border-red-300 cursor-default'
+                      : 'bg-[#FAF8F2] text-[#94A398] border-[#E5DEC9] cursor-default'
+                    : 'bg-[#FAF8F2] hover:bg-[#EA7A26]/10 hover:border-[#EA7A26] border-[#E5DEC9] text-[#172A1E] cursor-pointer'
                 }`}
               >
-                {opt}
+                <span className="w-6 h-6 rounded-md bg-white/80 text-[#172A1E] text-xs font-bold flex items-center justify-center shrink-0">
+                  {optIdx + 1}
+                </span>
+                <span>{opt}</span>
               </button>
             );
           })}
         </div>
+        {lockedChoice && (
+          <p className="text-xs font-bold text-[#1E5B3A] flex items-center gap-1.5">
+            <Lock className="w-3.5 h-3.5 text-[#EA7A26]" />
+            {lockedChoice.trim().toUpperCase() === q.answer.trim().toUpperCase()
+              ? 'Answer Locked · Sprint forward!'
+              : `Answer Locked · Correct answer: ${q.answer}`}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -549,14 +675,33 @@ export const OnTheRunGame: React.FC<CommonGameProps> = ({
 /* =========================================================
    3. BRAINZONE (Identification + Rising Platform + Timer)
    ========================================================= */
-export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, onComplete }) => {
-  const [idx, setIdx] = useState(0);
+export const BrainzoneGame: React.FC<CommonGameProps> = ({
+  questions,
+  profile,
+  savedProgress,
+  onSaveProgress,
+  onComplete,
+}) => {
+  const isAlreadyFinished = Boolean(
+    savedProgress && questions.length > 0 && savedProgress.idx >= questions.length
+  );
+
+  const initialIdx = savedProgress
+    ? Math.min(Math.max(0, savedProgress.idx), Math.max(0, questions.length - 1))
+    : 0;
+  const initialLevel =
+    savedProgress?.extra && typeof savedProgress.extra.platformLevel === 'number'
+      ? savedProgress.extra.platformLevel
+      : 1;
+  const initialTimeLeft = Math.max(75, Math.min(180, questions.length * 14));
+
+  const [idx, setIdx] = useState(initialIdx);
   const [typed, setTyped] = useState('');
-  const [platformLevel, setPlatformLevel] = useState(1);
-  const [timeLeft, setTimeLeft] = useState(60);
-  const [score, setScore] = useState(0);
-  const [correctCount, setCorrectCount] = useState(0);
-  const [answeredCount, setAnsweredCount] = useState(0);
+  const [platformLevel, setPlatformLevel] = useState(initialLevel);
+  const [timeLeft, setTimeLeft] = useState(initialTimeLeft);
+  const [score, setScore] = useState(savedProgress?.score || 0);
+  const [correctCount, setCorrectCount] = useState(savedProgress?.correctCount || 0);
+  const [answeredCount, setAnsweredCount] = useState(savedProgress?.answeredCount || 0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [startTime] = useState(() => Date.now());
@@ -578,9 +723,21 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
     };
   }, []);
 
+  useEffect(() => {
+    if (!isAlreadyFinished || completedRef.current || !savedProgress) return;
+    completedRef.current = true;
+    onComplete({
+      score: savedProgress.score || 0,
+      correctCount: savedProgress.correctCount || 0,
+      totalCount: questions.length,
+      durationSeconds: 1,
+      summaryNote: `Climbed to Platform Level ${initialLevel}!`,
+    });
+  }, [isAlreadyFinished, savedProgress, questions.length, onComplete, initialLevel]);
+
   // Single stable 1-second countdown interval (never resets on question advance)
   useEffect(() => {
-    if (questions.length === 0) return;
+    if (questions.length === 0 || isAlreadyFinished) return;
     const timer = window.setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -591,7 +748,7 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [questions.length]);
+  }, [questions.length, isAlreadyFinished]);
 
   useEffect(() => {
     if (timeLeft === 0 && questions.length > 0 && !completedRef.current) {
@@ -624,6 +781,14 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
     }
   }, [idx, expectedEnumItems.length]);
 
+  if (isAlreadyFinished) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-sm font-semibold text-[#1E5B3A]">
+        Finalizing your locked answers...
+      </div>
+    );
+  }
+
   if (!q) {
     return <EmptyDeckNotice />;
   }
@@ -648,19 +813,28 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
     const nextAnswered = answeredCount + 1;
     setAnsweredCount(nextAnswered);
 
+    // Save forward-only progress before feedback pause
+    onSaveProgress?.({
+      idx: idx + 1,
+      score: nextScore,
+      correctCount: nextCorrect,
+      answeredCount: nextAnswered,
+      extra: { platformLevel: nextLevel },
+    });
+
     if (isRight) {
       soundFx.playCorrect();
       setPlatformLevel(nextLevel);
       setCorrectCount(nextCorrect);
       setScore(nextScore);
-      setFeedback(`Platform elevated! +${isEnumeration ? 50 : 40} pts`);
+      setFeedback(`Answer Locked · Platform elevated! +${isEnumeration ? 50 : 40} pts`);
     } else {
       soundFx.playWrong();
-      setFeedback(`Correct answer: ${q.answer}`);
+      setFeedback(`Answer Locked · Correct answer: ${q.answer}`);
     }
 
-    setTyped('');
     timeoutRef.current = window.setTimeout(() => {
+      setTyped('');
       setFeedback(null);
       setSubmitting(false);
       if (idx + 1 >= questions.length) {
@@ -676,7 +850,7 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
       } else {
         setIdx((i) => i + 1);
       }
-    }, 850);
+    }, 950);
   };
 
   const elevationPercent = Math.min(84, (platformLevel - 1) * 14);
@@ -690,7 +864,7 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
             <ArrowUp className="w-4 h-4 text-[#EA7A26]" />
             Platform Lv. {platformLevel}
           </span>
-          <span className={`flex items-center gap-1 tabular-nums ${timeLeft <= 10 ? 'text-red-600' : 'text-[#C65B10]'}`}>
+          <span className={`flex items-center gap-1 tabular-nums ${timeLeft <= 15 ? 'text-red-600' : 'text-[#C65B10]'}`}>
             <Clock className="w-3.5 h-3.5" /> {timeLeft}s
           </span>
         </div>
@@ -772,14 +946,17 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
             />
           )}
           {feedback && (
-            <p className="text-xs font-bold text-[#EA7A26]">{feedback}</p>
+            <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5" />
+              {feedback}
+            </p>
           )}
           <button
             type="submit"
             disabled={submitting || !canSubmit}
             className="w-full py-3 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white font-bold text-sm transition-colors cursor-pointer disabled:opacity-50"
           >
-            {submitting ? 'Checking Answer...' : 'Elevate Platform'}
+            {submitting ? 'Answer Locked...' : 'Elevate Platform'}
           </button>
         </form>
       </div>
@@ -788,31 +965,29 @@ export const BrainzoneGame: React.FC<CommonGameProps> = ({ questions, profile, o
 };
 
 /* =========================================================
-   4. GRAB IT (Quiz + Steal Points from Classmates)
+   4. GRAB IT (Quiz + Mystery Bonus Vaults — NPC-free)
    ========================================================= */
 export const GrabItGame: React.FC<CommonGameProps> = ({
   questions,
-  profile,
-  allProfiles,
+  savedProgress,
+  onSaveProgress,
   onComplete,
 }) => {
-  const [idx, setIdx] = useState(0);
-  const [score, setScore] = useState(40);
-  const [correctCount, setCorrectCount] = useState(0);
-  const [canSteal, setCanSteal] = useState(false);
+  const isAlreadyFinished = Boolean(
+    savedProgress && questions.length > 0 && savedProgress.idx >= questions.length
+  );
+
+  const initialIdx = savedProgress
+    ? Math.min(Math.max(0, savedProgress.idx), Math.max(0, questions.length - 1))
+    : 0;
+
+  const [idx, setIdx] = useState(initialIdx);
+  const [score, setScore] = useState(savedProgress?.score ?? 20);
+  const [correctCount, setCorrectCount] = useState(savedProgress?.correctCount || 0);
+  const [canOpenChest, setCanOpenChest] = useState(false);
   const [resolving, setResolving] = useState(false);
-  const [rivals, setRivals] = useState(() => {
-    const peers = allProfiles.filter((p) => p.uid !== profile.uid).slice(0, 3);
-    const fallback = [
-      { id: 'g1', name: 'Carlos', points: 90 },
-      { id: 'g2', name: 'Bea', points: 75 },
-      { id: 'g3', name: 'Nico', points: 60 },
-    ];
-    return fallback.map((f, i) =>
-      peers[i] ? { id: peers[i].uid, name: peers[i].displayName.split(' ')[0], points: 80 + i * 15 } : f
-    );
-  });
-  const [statusMsg, setStatusMsg] = useState('Answer correctly to bank points or steal from a rival!');
+  const [openedChestIdx, setOpenedChestIdx] = useState<number | null>(null);
+  const [statusMsg, setStatusMsg] = useState('Answer correctly to unlock a Mystery Bonus Vault!');
   const [startTime] = useState(() => Date.now());
   const timeoutRef = useRef<number | null>(null);
   const completedRef = useRef(false);
@@ -823,8 +998,28 @@ export const GrabItGame: React.FC<CommonGameProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (!isAlreadyFinished || completedRef.current || !savedProgress) return;
+    completedRef.current = true;
+    onComplete({
+      score: savedProgress.score ?? 20,
+      correctCount: savedProgress.correctCount || 0,
+      totalCount: questions.length,
+      durationSeconds: 1,
+    });
+  }, [isAlreadyFinished, savedProgress, questions.length, onComplete]);
+
   const q = questions[idx];
   const displayOptions = useMemo(() => (q ? normalizeOptions(q) : []), [q]);
+  const chestRewards = useMemo(() => shuffle([15, 25, 40]), [idx]);
+
+  if (isAlreadyFinished) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-sm font-semibold text-[#1E5B3A]">
+        Finalizing your locked answers...
+      </div>
+    );
+  }
 
   if (!q) {
     return <EmptyDeckNotice />;
@@ -842,81 +1037,109 @@ export const GrabItGame: React.FC<CommonGameProps> = ({
       });
     } else {
       setIdx((i) => i + 1);
-      setCanSteal(false);
+      setCanOpenChest(false);
+      setOpenedChestIdx(null);
       setResolving(false);
-      setStatusMsg('Answer correctly to bank points or steal from a rival!');
+      setStatusMsg('Answer correctly to unlock a Mystery Bonus Vault!');
     }
   };
 
   const handlePick = (opt: string) => {
-    if (canSteal || resolving || completedRef.current) return;
+    if (canOpenChest || resolving || completedRef.current) return;
     const isRight = opt.trim().toUpperCase() === q.answer.trim().toUpperCase();
     if (isRight) {
       soundFx.playCorrect();
-      setCorrectCount((c) => c + 1);
-      setScore((s) => s + 25);
-      setCanSteal(true);
-      setStatusMsg('Correct! Choose a player below to GRAB +25 points, or skip to Bank!');
+      const nextCorrect = correctCount + 1;
+      const nextScore = score + 25;
+      setCorrectCount(nextCorrect);
+      setScore(nextScore);
+      setCanOpenChest(true);
+      setStatusMsg('Correct (+25 pts)! Pick a Mystery Bonus Vault below or Bank Safe!');
+      // Forward-only lock at Q answered (with safe +15 minimum if reloaded before chest pick)
+      onSaveProgress?.({
+        idx: idx + 1,
+        score: nextScore + 15,
+        correctCount: nextCorrect,
+      });
     } else {
       setResolving(true);
       soundFx.playWrong();
-      setStatusMsg(`Missed! Correct answer was ${q.answer}.`);
-      timeoutRef.current = window.setTimeout(() => advance(score, correctCount), 900);
+      setStatusMsg(`Answer Locked · Missed! Correct answer was ${q.answer}.`);
+      onSaveProgress?.({
+        idx: idx + 1,
+        score,
+        correctCount,
+      });
+      timeoutRef.current = window.setTimeout(() => advance(score, correctCount), 950);
     }
   };
 
-  const handleSteal = (rivalId: string) => {
-    if (!canSteal || resolving || completedRef.current) return;
+  const handleOpenChest = (chestIndex: number) => {
+    if (!canOpenChest || resolving || completedRef.current) return;
     setResolving(true);
+    setOpenedChestIdx(chestIndex);
     soundFx.playLevelUp();
-    setRivals((prev) =>
-      prev.map((r) => (r.id === rivalId ? { ...r, points: Math.max(0, r.points - 25) } : r))
-    );
-    const nextScore = score + 25;
+    const bonus = chestRewards[chestIndex] || 20;
+    const nextScore = score + bonus;
     setScore(nextScore);
-    setStatusMsg('Grabbed +25 points!');
-    timeoutRef.current = window.setTimeout(() => advance(nextScore, correctCount), 650);
+    setStatusMsg(`Vault opened! Grabbed +${bonus} bonus points!`);
+    onSaveProgress?.({
+      idx: idx + 1,
+      score: nextScore,
+      correctCount,
+    });
+    timeoutRef.current = window.setTimeout(() => advance(nextScore, correctCount), 750);
   };
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between text-xs font-semibold text-[#4D6354] tabular-nums">
-        <span>Grab It · Question {idx + 1}/{questions.length}</span>
-        <span className="text-[#1E5B3A] font-bold">Your Round Points: {score}</span>
+        <span>
+          Grab It · Question {idx + 1}/{questions.length}
+        </span>
+        <span className="text-[#1E5B3A] font-bold">Vault Points: {score}</span>
       </div>
 
-      {/* Rival Scoreboard for Point Stealing */}
+      {/* 3 Mystery Bonus Vaults */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        {rivals.map((r) => (
-          <button
-            key={r.id}
-            type="button"
-            disabled={!canSteal || resolving}
-            onClick={() => handleSteal(r.id)}
-            className={`p-4 rounded-2xl border text-left transition-all flex items-center justify-between ${
-              canSteal && !resolving
-                ? 'border-[#EA7A26] bg-[#FFF8F1] hover:scale-[1.02] cursor-pointer'
-                : 'border-[#E5DEC9] bg-[#FAF8F2] cursor-default'
-            }`}
-          >
-            <div>
-              <p className="text-sm font-bold text-[#172A1E]">{r.name}</p>
-              <p className="text-xs text-[#4D6354] tabular-nums">{r.points} pts</p>
-            </div>
-            {canSteal && !resolving && (
+        {chestRewards.map((rewardVal, cIdx) => {
+          const isOpened = openedChestIdx === cIdx;
+          return (
+            <button
+              key={cIdx}
+              type="button"
+              disabled={!canOpenChest || resolving}
+              onClick={() => handleOpenChest(cIdx)}
+              className={`p-4 rounded-2xl border text-left transition-all flex items-center justify-between ${
+                isOpened
+                  ? 'border-[#1E5B3A] bg-emerald-50'
+                  : canOpenChest && !resolving
+                    ? 'border-[#EA7A26] bg-[#FFF8F1] hover:scale-[1.02] cursor-pointer'
+                    : 'border-[#E5DEC9] bg-[#FAF8F2] cursor-default'
+              }`}
+            >
+              <div>
+                <p className="text-sm font-bold text-[#172A1E]">
+                  Bonus Vault #{cIdx + 1}
+                </p>
+                <p className="text-xs text-[#4D6354] tabular-nums">
+                  {isOpened ? `Opened: +${rewardVal} pts` : 'Mystery Reward (+15 to +40)'}
+                </p>
+              </div>
               <span className="text-xs font-bold text-[#EA7A26] flex items-center gap-1">
-                <Swords className="w-4 h-4" /> Grab 25
+                <Package className="w-4 h-4" />
+                {canOpenChest && !resolving ? 'Grab!' : isOpened ? `+${rewardVal}` : 'Locked'}
               </span>
-            )}
-          </button>
-        ))}
+            </button>
+          );
+        })}
       </div>
 
       <div className="bg-white rounded-2xl border border-[#E5DEC9] p-6">
         <p className="text-xs font-semibold text-[#EA7A26] mb-2">{statusMsg}</p>
         <h3 className="text-lg font-bold text-[#172A1E] mb-4">{q.prompt}</h3>
 
-        {!canSteal ? (
+        {!canOpenChest ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {displayOptions.map((opt, optIdx) => (
               <button
@@ -934,10 +1157,16 @@ export const GrabItGame: React.FC<CommonGameProps> = ({
           <button
             type="button"
             disabled={resolving}
-            onClick={() => advance(score, correctCount)}
+            onClick={() => {
+              setResolving(true);
+              const safeScore = score + 15;
+              setScore(safeScore);
+              onSaveProgress?.({ idx: idx + 1, score: safeScore, correctCount });
+              advance(safeScore, correctCount);
+            }}
             className="px-5 py-2.5 rounded-xl bg-[#1E5B3A] text-white text-xs font-bold cursor-pointer disabled:opacity-50"
           >
-            Skip Steal &amp; Next Question
+            Bank Safe (+15 pts) &amp; Next Question
           </button>
         )}
       </div>
@@ -946,46 +1175,57 @@ export const GrabItGame: React.FC<CommonGameProps> = ({
 };
 
 /* =========================================================
-   5. CATCH THE DUCK (Teacher Recitation Pond + Solo Mode)
+   5. CATCH THE DUCK (Teacher Recitation Pond + Solo Mystery Pond — NPC-free)
    ========================================================= */
 export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
   questions,
   profile,
   allProfiles,
+  savedProgress,
+  onSaveProgress,
   onComplete,
   onAwardStudent,
 }) => {
+  const isTeacher = profile.role === 'teacher' || profile.role === 'admin';
+
   const studentsPool = useMemo(() => {
+    if (!isTeacher) return [];
     const allStudents = allProfiles.filter((p) => p.role === 'student');
-    const teacherSection = profile.role === 'teacher' ? profile.section?.trim() : '';
+    const teacherSection = profile.section?.trim() || '';
     const sectionStudents = teacherSection
       ? allStudents.filter((p) => (p.section || '').trim() === teacherSection)
       : [];
-    const list = sectionStudents.length >= 2 ? sectionStudents : allStudents;
-    if (list.length >= 2) return list;
-    return [
-      profile,
-      ...['Andrea', 'Miguel', 'Sophia', 'Rafael'].map((n, i) => ({
-        ...profile,
-        uid: `demo_duck_${i}`,
-        displayName: n,
-        petName: `Duckling ${i + 1}`,
-      })),
-    ];
-  }, [allProfiles, profile]);
+    return sectionStudents.length > 0 ? sectionStudents : allStudents;
+  }, [allProfiles, isTeacher, profile.section]);
 
-  const [ducks, setDucks] = useState(() =>
-    shuffle(studentsPool).slice(0, 6).map((s, idx) => ({
+  const initialCaughtCount = savedProgress
+    ? Math.min(Math.max(0, savedProgress.idx), Math.max(0, questions.length))
+    : 0;
+
+  const [ducks, setDucks] = useState(() => {
+    if (isTeacher) {
+      return shuffle(studentsPool)
+        .slice(0, 6)
+        .map((s, idx) => ({
+          duckNumber: idx + 1,
+          student: s as PublicProfile | null,
+          label: s.displayName,
+          caught: idx < initialCaughtCount,
+        }));
+    }
+    const soloCount = Math.min(6, Math.max(1, questions.length));
+    return Array.from({ length: soloCount }, (_, idx) => ({
       duckNumber: idx + 1,
-      student: s,
-      caught: false,
-    }))
-  );
+      student: profile as PublicProfile | null,
+      label: `Mystery Duck #${idx + 1}`,
+      caught: idx < initialCaughtCount,
+    }));
+  });
 
   const [caughtDuckIdx, setCaughtDuckIdx] = useState<number | null>(null);
-  const [questionIdx, setQuestionIdx] = useState(0);
-  const [roundPoints, setRoundPoints] = useState(0);
-  const [correctCount, setCorrectCount] = useState(0);
+  const [questionIdx, setQuestionIdx] = useState(initialCaughtCount);
+  const [roundPoints, setRoundPoints] = useState(savedProgress?.score || 0);
+  const [correctCount, setCorrectCount] = useState(savedProgress?.correctCount || 0);
   const [teacherStatus, setTeacherStatus] = useState<string>('');
   const [soloPicked, setSoloPicked] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
@@ -993,21 +1233,57 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
   const timeoutRef = useRef<number | null>(null);
   const completedRef = useRef(false);
 
+  const isAlreadyFinished = Boolean(
+    !isTeacher && savedProgress && ducks.length > 0 && initialCaughtCount >= ducks.length
+  );
+
   useEffect(() => {
     return () => {
       if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
     };
   }, []);
 
+  useEffect(() => {
+    if (!isAlreadyFinished || completedRef.current || !savedProgress) return;
+    completedRef.current = true;
+    onComplete({
+      score: savedProgress.score || 0,
+      correctCount: savedProgress.correctCount || 0,
+      totalCount: ducks.length,
+      durationSeconds: 1,
+      summaryNote: 'Caught all mystery ducks!',
+    });
+  }, [isAlreadyFinished, savedProgress, ducks.length, onComplete]);
+
   const activeQuestion = questions.length > 0 ? questions[questionIdx % questions.length] : null;
   const activeOptions = useMemo(
     () => (activeQuestion ? normalizeOptions(activeQuestion) : []),
     [activeQuestion]
   );
-  const isTeacher = profile.role === 'teacher' || profile.role === 'admin';
+
+  if (isAlreadyFinished) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] text-sm font-semibold text-[#1E5B3A]">
+        Finalizing your locked pond round...
+      </div>
+    );
+  }
 
   if (!activeQuestion) {
     return <EmptyDeckNotice />;
+  }
+
+  if (isTeacher && ducks.length === 0) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-2">
+        <p className="text-sm font-bold text-[#172A1E]">
+          No Real Students Enrolled in This Section Yet
+        </p>
+        <p className="text-xs text-[#4D6354]">
+          Catch the Duck Recitation Host only picks from real enrolled SLA students in your classroom (no NPC bots). Once students join your section, click back to launch the pond.
+        </p>
+      </div>
+    );
   }
 
   const handleCatchDuck = (idx: number) => {
@@ -1028,23 +1304,32 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
       soundFx.playCorrect();
       setCorrectCount(nextCorrect);
       setRoundPoints(nextPoints);
-      if (isTeacher && onAwardStudent && !picked.student.uid.startsWith('demo_duck_')) {
+      if (isTeacher && onAwardStudent && picked.student) {
         await onAwardStudent(picked.student.uid, 50);
         setTeacherStatus(`Awarded +50 pts to ${picked.student.displayName}!`);
+      } else if (!isTeacher) {
+        setTeacherStatus('Nice catch! +50 pts');
       }
     } else {
       soundFx.playWrong();
       if (!isTeacher) {
-        setTeacherStatus(`Answer was: ${activeQuestion.answer}`);
+        setTeacherStatus(`Answer Locked · Correct answer: ${activeQuestion.answer}`);
       }
     }
 
     const updated = ducks.map((d, i) => (i === caughtDuckIdx ? { ...d, caught: true } : d));
+    const nextQuestionIdx = questionIdx + 1;
     setDucks(updated);
     setCaughtDuckIdx(null);
     setSoloPicked(null);
-    setQuestionIdx((q) => q + 1);
+    setQuestionIdx(nextQuestionIdx);
     setResolving(false);
+
+    onSaveProgress?.({
+      idx: updated.filter((d) => d.caught).length,
+      score: nextPoints,
+      correctCount: nextCorrect,
+    });
 
     if (updated.every((d) => d.caught)) {
       completedRef.current = true;
@@ -1080,17 +1365,18 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
     }
     timeoutRef.current = window.setTimeout(() => {
       void finalizeDuckResolution(isCorrect);
-    }, 700);
+    }, 850);
   };
 
-  const caughtStudent = caughtDuckIdx !== null ? ducks[caughtDuckIdx].student : null;
+  const caughtDuck = caughtDuckIdx !== null ? ducks[caughtDuckIdx] : null;
+  const caughtStudent = caughtDuck?.student || null;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between text-xs font-semibold text-[#4D6354]">
         <span>
           {isTeacher
-            ? 'Teacher Recitation Host · Click an unknown duck to pick a student!'
+            ? 'Teacher Recitation Host · Click a duck to pick a real student!'
             : 'Catch the Duck · Tap a swimming mystery duck to reveal your question!'}
         </span>
         <span className="text-[#1E5B3A] font-bold tabular-nums">Round Points: {roundPoints}</span>
@@ -1105,12 +1391,12 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
               type="button"
               disabled={d.caught || caughtDuckIdx !== null}
               onClick={() => handleCatchDuck(i)}
-              className={`p-4 rounded-2xl border-2 text-center transition-all cursor-pointer ${
+              className={`p-4 rounded-2xl border-2 text-center transition-all ${
                 d.caught
                   ? 'bg-white/40 border-teal-200 opacity-50 cursor-default'
                   : caughtDuckIdx === i
-                  ? 'bg-[#FFF8F1] border-[#EA7A26] scale-105'
-                  : 'bg-white/85 border-white hover:border-[#EA7A26] animate-duck-swim'
+                  ? 'bg-[#FFF8F1] border-[#EA7A26] scale-105 cursor-pointer'
+                  : 'bg-white/85 border-white hover:border-[#EA7A26] animate-duck-swim cursor-pointer'
               }`}
             >
               <svg width="56" height="56" viewBox="0 0 64 64" className="mx-auto" aria-hidden="true">
@@ -1120,7 +1406,7 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
                 <circle cx="40" cy="22" r="2" fill="#2C2A24" />
               </svg>
               <p className="text-xs font-bold text-[#172A1E] mt-1">
-                {d.caught ? d.student.displayName : `Mystery Duck #${d.duckNumber}`}
+                {d.caught ? (isTeacher ? d.label : `Caught #${d.duckNumber}`) : `Mystery Duck #${d.duckNumber}`}
               </p>
             </button>
           ))}
@@ -1135,12 +1421,16 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
       )}
 
       {/* Active Recitation Card */}
-      {caughtStudent && (
+      {caughtDuck && caughtStudent && (
         <div className="bg-white rounded-2xl border-2 border-[#EA7A26] p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs font-bold text-[#EA7A26]">Caught Student for Recitation</p>
-              <h4 className="text-xl font-extrabold text-[#172A1E]">{caughtStudent.displayName}</h4>
+              <p className="text-xs font-bold text-[#EA7A26]">
+                {isTeacher ? 'Caught Student for Recitation' : `Mystery Duck #${caughtDuck.duckNumber}`}
+              </p>
+              <h4 className="text-xl font-extrabold text-[#172A1E]">
+                {isTeacher ? caughtStudent.displayName : `${profile.displayName} (Solo Pond)`}
+              </h4>
             </div>
             <PetAvatar
               species={caughtStudent.petSpecies}
@@ -1191,14 +1481,14 @@ export const CatchTheDuckGame: React.FC<CommonGameProps> = ({
                     type="button"
                     disabled={resolving || Boolean(soloPicked)}
                     onClick={() => handleSoloPick(opt)}
-                    className={`p-3 rounded-xl border text-left text-sm font-semibold cursor-pointer transition-colors ${
+                    className={`p-3 rounded-xl border text-left text-sm font-semibold transition-colors ${
                       soloPicked
                         ? isRight
-                          ? 'bg-[#1E5B3A] text-white border-[#1E5B3A]'
+                          ? 'bg-[#1E5B3A] text-white border-[#1E5B3A] cursor-default'
                           : isMine
-                          ? 'bg-red-50 text-red-700 border-red-300'
-                          : 'bg-[#FAF8F2] text-[#94A398] border-[#E5DEC9]'
-                        : 'border-[#E5DEC9] bg-[#FAF8F2] hover:border-[#1E5B3A] text-[#172A1E]'
+                          ? 'bg-red-50 text-red-700 border-red-300 cursor-default'
+                          : 'bg-[#FAF8F2] text-[#94A398] border-[#E5DEC9] cursor-default'
+                        : 'border-[#E5DEC9] bg-[#FAF8F2] hover:border-[#1E5B3A] text-[#172A1E] cursor-pointer'
                     }`}
                   >
                     {opt}

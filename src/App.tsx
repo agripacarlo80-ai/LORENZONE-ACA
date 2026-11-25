@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertOctagon } from 'lucide-react';
+import { AlertOctagon, Lock } from 'lucide-react';
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import {
   collection,
@@ -180,7 +180,13 @@ function LorenzoneApp() {
 
   // Load current user's profile and faculty authorization status
   useEffect(() => {
-    if (!authReady || !user) return;
+    if (!authReady || !user) {
+      setMyProfile(null);
+      setProfileLoaded(false);
+      setAuthorizedRole(null);
+      setAuthzChecked(false);
+      return;
+    }
 
     const emailLower = (user.email || '').toLowerCase();
     const checkAuthz = async () => {
@@ -627,6 +633,7 @@ function LorenzoneApp() {
       try {
         await updateDoc(doc(db, 'publicProfiles', user.uid), {
           isOnline: false,
+          activeGame: 'Idle',
           updatedAt: serverTimestamp(),
         });
       } catch {
@@ -1579,15 +1586,29 @@ function LorenzoneApp() {
     };
   }, [myClassroomSession, completedClassSessionKeys, allDecks]);
 
+  const isStudentLockedInClassQuiz = Boolean(
+    myProfile?.role === 'student' && forcedLaunchSession
+  );
+
   useEffect(() => {
     if (!forcedLaunchSession || myProfile?.role !== 'student') return;
-    if (lastAutoLaunchedSessionKeyRef.current === forcedLaunchSession.sessionKey) return;
-    lastAutoLaunchedSessionKeyRef.current = forcedLaunchSession.sessionKey;
-    setLaunchGameId(forcedLaunchSession.gameId);
-    setLaunchDeckId(forcedLaunchSession.deckId);
-    setActiveTab('games');
-    soundFx.playLevelUp();
-  }, [forcedLaunchSession, myProfile?.role]);
+    if (lastAutoLaunchedSessionKeyRef.current !== forcedLaunchSession.sessionKey) {
+      lastAutoLaunchedSessionKeyRef.current = forcedLaunchSession.sessionKey;
+      setShowSettings(false);
+      setShowInstructions(false);
+      setShowGameRules(false);
+      soundFx.playLevelUp();
+    }
+    if (launchGameId !== forcedLaunchSession.gameId) {
+      setLaunchGameId(forcedLaunchSession.gameId);
+    }
+    if (launchDeckId !== forcedLaunchSession.deckId) {
+      setLaunchDeckId(forcedLaunchSession.deckId);
+    }
+    if (activeTab !== 'games') {
+      setActiveTab('games');
+    }
+  }, [forcedLaunchSession, myProfile?.role, activeTab, launchGameId, launchDeckId]);
 
   const lockedAlerts = useMemo(() => {
     const activeLocked = alerts.filter((a) => a.status === 'locked');
@@ -1643,7 +1664,6 @@ function LorenzoneApp() {
       />
     );
   }
-
 
   if (!profileLoaded || !authzChecked) {
     return (
@@ -1705,9 +1725,13 @@ function LorenzoneApp() {
             href={isAdminUser ? '#monitor' : '#home'}
             onClick={(e) => {
               e.preventDefault();
+              if (isStudentLockedInClassQuiz) return;
               setActiveTab(isAdminUser ? 'monitor' : 'home');
             }}
-            className="text-xl font-extrabold tracking-tight whitespace-nowrap shrink-0"
+            aria-disabled={isStudentLockedInClassQuiz}
+            className={`text-xl font-extrabold tracking-tight whitespace-nowrap shrink-0 ${
+              isStudentLockedInClassQuiz ? 'opacity-80 cursor-not-allowed' : ''
+            }`}
             style={{ color: 'var(--lz-header-brand-left)' }}
           >
             LOREN<span style={{ color: 'var(--lz-header-brand-right)' }}>ZONE</span>
@@ -1718,33 +1742,42 @@ function LorenzoneApp() {
               <>
                 <button
                   type="button"
+                  disabled={isStudentLockedInClassQuiz}
                   onClick={() => {
+                    if (isStudentLockedInClassQuiz) return;
                     soundFx.playClick();
                     setActiveTab('home');
                   }}
-                  className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
-                    activeTab === 'home'
-                      ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
-                      : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
+                  title={isStudentLockedInClassQuiz ? 'Locked until live classroom quiz ends' : undefined}
+                  className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors ${
+                    isStudentLockedInClassQuiz
+                      ? 'border-transparent text-[var(--lz-header-nav)] opacity-45 cursor-not-allowed'
+                      : activeTab === 'home'
+                        ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)] cursor-pointer'
+                        : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)] cursor-pointer'
                   }`}
                 >
                   Pet Home
                 </button>
                 <button
                   type="button"
+                  disabled={isStudentLockedInClassQuiz}
                   onClick={() => {
+                    if (isStudentLockedInClassQuiz) return;
                     soundFx.playClick();
                     setLaunchGameId(null);
                     setLaunchDeckId(null);
                     setActiveTab('games');
                   }}
-                  className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
-                    activeTab === 'games'
-                      ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
-                      : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
+                  className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors ${
+                    isStudentLockedInClassQuiz
+                      ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)] cursor-default'
+                      : activeTab === 'games'
+                        ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)] cursor-pointer'
+                        : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)] cursor-pointer'
                   }`}
                 >
-                  Quiz Games
+                  {isStudentLockedInClassQuiz ? 'Live Class Quiz (Locked)' : 'Quiz Games'}
                 </button>
               </>
             )}
@@ -1766,14 +1799,19 @@ function LorenzoneApp() {
             )}
             <button
               type="button"
+              disabled={isStudentLockedInClassQuiz}
               onClick={() => {
+                if (isStudentLockedInClassQuiz) return;
                 soundFx.playClick();
                 setActiveTab('leaderboard');
               }}
-              className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors cursor-pointer ${
-                activeTab === 'leaderboard'
-                  ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)]'
-                  : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)]'
+              title={isStudentLockedInClassQuiz ? 'Locked until live classroom quiz ends' : undefined}
+              className={`whitespace-nowrap shrink-0 py-1 border-b-2 transition-colors ${
+                isStudentLockedInClassQuiz
+                  ? 'border-transparent text-[var(--lz-header-nav)] opacity-45 cursor-not-allowed'
+                  : activeTab === 'leaderboard'
+                    ? 'border-[var(--lz-header-brand-right)] text-[var(--lz-header-nav-active)] cursor-pointer'
+                    : 'border-transparent text-[var(--lz-header-nav)] hover:text-[var(--lz-header-nav-active)] cursor-pointer'
               }`}
             >
               Leaderboard
@@ -1792,6 +1830,11 @@ function LorenzoneApp() {
               >
                 {totalAdminQueueCount > 0 ? `Approvals (${totalAdminQueueCount})` : 'Admin Monitor'}
               </button>
+            ) : isStudentLockedInClassQuiz ? (
+              <span className="px-3.5 py-2 rounded-xl bg-[#EA7A26]/20 border border-[#EA7A26]/40 text-xs font-bold text-[#EA7A26] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                <Lock className="w-3.5 h-3.5" />
+                Quiz Locked
+              </span>
             ) : (
               <button
                 type="button"
@@ -1823,6 +1866,7 @@ function LorenzoneApp() {
           role={myProfile.role}
           section={myProfile.section}
           lockedAlertCount={isAdminUser ? 0 : lockedAlertCount}
+          quizLocked={isStudentLockedInClassQuiz}
         />
 
         {myProfile.role === 'teacher' &&
@@ -1906,6 +1950,7 @@ function LorenzoneApp() {
             allProfiles={allProfiles}
             decks={allDecks}
             alerts={alerts}
+            records={scoreRecords}
             initialGameId={launchGameId}
             initialDeckId={launchDeckId}
             classroomSessions={classroomSessions}
@@ -1918,6 +1963,7 @@ function LorenzoneApp() {
             onStartClassroomSession={handleStartClassroomSession}
             onEndClassroomSession={handleEndClassroomSession}
             onTriggerCheatLock={handleTriggerCheatLock}
+            onAllowStudent={handleAllowStudent}
             onRecordGameResult={handleRecordGameResult}
             onAwardStudent={handleAwardStudent}
             onSetActiveGame={(activeGame) => reportActivity(activeGame)}
@@ -1991,6 +2037,7 @@ function LorenzoneApp() {
           sectionRequest={mySectionRequest}
           onRequestSectionChange={handleRequestSectionChange}
           onClaimRoleWithCode={handleClaimRoleWithCode}
+          quizLocked={isStudentLockedInClassQuiz}
           onSignOut={async () => {
             await handleFullSignOut();
             setShowSettings(false);

@@ -298,11 +298,12 @@ async function startServer() {
         }
 
         const rawPanels = Array.isArray(q.cluePanels) ? q.cluePanels : [];
+        const panelTargetCount = rawPanels.length >= 6 ? 6 : 4;
         const cluePanels =
           rawType === 'four_pics' || rawPanels.length >= 4
-            ? [0, 1, 2, 3].map((pIdx) => ({
+            ? Array.from({ length: panelTargetCount }, (_, pIdx) => ({
                 label: cleanStr(rawPanels[pIdx]?.label, 36) || `Visual Clue ${pIdx + 1}`,
-                emoji: cleanStr(rawPanels[pIdx]?.emoji, 8) || ['🔍', '📚', '💡', '🧩'][pIdx],
+                emoji: cleanStr(rawPanels[pIdx]?.emoji, 8) || ['🔍', '📚', '💡', '🧩', '🧭', '⚡'][pIdx],
               }))
             : undefined;
 

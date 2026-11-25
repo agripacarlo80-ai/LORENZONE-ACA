@@ -17,7 +17,13 @@ import {
   Lock,
 } from 'lucide-react';
 import { PET_COLORS, PET_SPECIES_INFO, SLA_SECTIONS } from '../data/defaultDecks';
-import { PetSpecies, PublicProfile, SchoolIdVerification, SectionChangeRequest, UserRole } from '../types';
+import {
+  PetSpecies,
+  PublicProfile,
+  SchoolIdVerification,
+  SectionChangeRequest,
+  UserRole,
+} from '../types';
 import { PetAvatar } from './PetAvatar';
 import { soundFx } from '../lib/sound';
 import { compressProfilePhoto, compressSchoolIdImage } from '../lib/imageUpload';
@@ -220,7 +226,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             <p className="mt-0.5 leading-relaxed">
                 {portalMode === 'faculty'
                   ? 'Multiple teachers and co-admins can sign in using their Gmail and the academy Secret Code.'
-                  : 'Verified Google Sign-In and student School ID verification ensure only enrolled SLA students can access campus rooms.'}
+                  : 'Verified Google Sign-In and School ID checks ensure only enrolled SLA students can access campus rooms.'}
               </p>
             </div>
           </div>

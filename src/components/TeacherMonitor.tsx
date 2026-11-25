@@ -285,6 +285,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
   const [adminTargetRoom, setAdminTargetRoom] = useState<string>(SLA_SECTIONS[6]);
   const [launcherBusy, setLauncherBusy] = useState(false);
   const [launcherFeedback, setLauncherFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [showActiveAnswerKey, setShowActiveAnswerKey] = useState(false);
 
   // Admin Student School ID Approval state
   const [approvalFilter, setApprovalFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
@@ -755,7 +756,7 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
             ];
           }
           if (!q.prompt.trim()) {
-            next.prompt = `4 Pics 1 Word: Decode the 4 visual clues to guess the ${deckSubject} term!`;
+            next.prompt = `4 Pics 1 Word: Decode the visual clues to guess the ${deckSubject} term!`;
           }
         }
         return next;
@@ -771,15 +772,12 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
       setQuestions((prev) =>
         prev.map((q, i) => {
           if (i !== qIdx) return q;
-          const basePanels: CluePanel[] =
-            q.cluePanels && q.cluePanels.length === 4
-              ? [...q.cluePanels]
-              : [
-                  { label: '', emoji: '🔍' },
-                  { label: '', emoji: '💡' },
-                  { label: '', emoji: '📚' },
-                  { label: '', emoji: '🧩' },
-                ];
+          const targetCount = q.cluePanels && q.cluePanels.length >= 6 ? 6 : 4;
+          const basePanels: CluePanel[] = Array.from({ length: targetCount }, (_, pIdx) => ({
+            label: q.cluePanels?.[pIdx]?.label || '',
+            emoji: q.cluePanels?.[pIdx]?.emoji || ['🔍', '💡', '📚', '🧩', '🧭', '⚡'][pIdx],
+            imageUrl: q.cluePanels?.[pIdx]?.imageUrl,
+          }));
           basePanels[panelIdx] = {
             ...basePanels[panelIdx],
             imageUrl: compressedUrl,
@@ -1188,32 +1186,45 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               <div>
                 <p className="text-xs font-bold text-[#EA7A26] flex items-center gap-1.5">
                   <Radio className="w-3.5 h-3.5" />
-                  Live Classroom Quiz Control
+                  Live Classroom Quiz Control (Monitor-Only)
                 </p>
                 <h3 className="text-lg font-bold text-[#172A1E] mt-0.5">
-                  Send Students in {launcherTargetSection} Straight to a Quiz
+                  Launch &amp; Monitor Students in {launcherTargetSection}
                 </h3>
                 <p className="text-xs text-[#4D6354]">
                   Choose a quiz deck and mini-game for your classroom. Enrolled students in{' '}
-                  <strong>{launcherTargetSection}</strong> automatically open your selected quiz on their dashboard.
+                  <strong>{launcherTargetSection}</strong> enter automatically and stay locked inside the quiz until they finish or you click End Live Quiz — you only monitor here without answering questions.
                 </p>
               </div>
               {activeSessionForTarget && (
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-[#1E5B3A] whitespace-nowrap">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                     Live Now
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      soundFx.playClick();
-                      onLaunchTeacherGame(activeSessionForTarget.gameId, activeSessionForTarget.deckId);
-                    }}
-                    className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    Open Host View
-                  </button>
+                  {activeSessionForTarget.gameId === 'catch_the_duck' ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playClick();
+                        onLaunchTeacherGame(activeSessionForTarget.gameId, activeSessionForTarget.deckId);
+                      }}
+                      className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      Open Duck Recitation Host
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playClick();
+                        setShowActiveAnswerKey((v) => !v);
+                      }}
+                      className="px-3.5 py-2 rounded-xl border border-[#1E5B3A] text-[#1E5B3A] hover:bg-[#1E5B3A]/5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      {showActiveAnswerKey ? 'Hide Answer Key' : 'View Answer Key'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={launcherBusy}
@@ -1246,32 +1257,124 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               )}
             </div>
 
-            {activeSessionForTarget && (
-              <div className="p-3.5 rounded-2xl bg-[#FAF8F2] border border-[#1E5B3A]/30 flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div>
-                  <span className="font-bold text-[#1E5B3A]">
-                    Active in {activeSessionForTarget.section}:
-                  </span>{' '}
-                  <span className="font-bold text-[#172A1E]">{activeSessionForTarget.gameTitle}</span>
-                  <span className="text-[#4D6354]">
-                    {' '}
-                    · {activeSessionForTarget.subject}: {activeSessionForTarget.deckTitle} · Started by{' '}
-                    {activeSessionForTarget.teacherName}
-                  </span>
+            {activeSessionForTarget && (() => {
+              const sessionStudents = allStudents.filter(
+                (st) => (st.section || '').trim() === activeSessionForTarget.section.trim()
+              );
+              const sessionStartMs = timestampToMillis(activeSessionForTarget.startedAt);
+              const activeSessionDeck =
+                publishedDecks.find((d) => d.id === activeSessionForTarget.deckId) || null;
+              const finishedByUid = new Map<string, ScoreRecord>();
+              records.forEach((rec) => {
+                if (
+                  rec.gameId === activeSessionForTarget.gameId &&
+                  rec.deckId === activeSessionForTarget.deckId &&
+                  (!sessionStartMs || timestampToMillis(rec.createdAt) >= sessionStartMs - 5000) &&
+                  !finishedByUid.has(rec.studentId)
+                ) {
+                  finishedByUid.set(rec.studentId, rec);
+                }
+              });
+              const insideCount = sessionStudents.filter(
+                (st) =>
+                  getStudentPresence(st, nowMs).isOnline &&
+                  st.activeGame === `Playing: ${activeSessionForTarget.gameTitle}`
+              ).length;
+
+              return (
+                <div className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#1E5B3A]/30 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="font-bold text-[#1E5B3A]">
+                        Active in {activeSessionForTarget.section}:
+                      </span>{' '}
+                      <span className="font-bold text-[#172A1E]">{activeSessionForTarget.gameTitle}</span>
+                      <span className="text-[#4D6354]">
+                        {' '}
+                        · {activeSessionForTarget.subject}: {activeSessionForTarget.deckTitle} · Started by{' '}
+                        {activeSessionForTarget.teacherName}
+                      </span>
+                    </div>
+                    <span className="font-semibold text-[#EA7A26] tabular-nums">
+                      {insideCount} taking quiz · {finishedByUid.size} completed
+                    </span>
+                  </div>
+
+                  {sessionStudents.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+                      {sessionStudents.map((st) => {
+                        const pres = getStudentPresence(st, nowMs);
+                        const rec = finishedByUid.get(st.uid);
+                        const alertMatch = lockedAlerts.find((a) => a.studentId === st.uid);
+                        const inQuiz =
+                          pres.isOnline && st.activeGame === `Playing: ${activeSessionForTarget.gameTitle}`;
+
+                        return (
+                          <div
+                            key={st.uid}
+                            className="px-3 py-2 rounded-xl bg-white border border-[#E5DEC9] flex items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <p className="font-bold text-[#172A1E] truncate">{st.displayName}</p>
+                              <p className="text-[11px] text-[#4D6354]">
+                                {st.lockedOut
+                                  ? 'Anti-Cheat Locked'
+                                  : rec
+                                    ? `Finished · ${rec.score} pts (${rec.correctCount}/${rec.totalCount})`
+                                    : inQuiz
+                                      ? 'Taking Quiz (Locked)'
+                                      : pres.isOnline
+                                        ? 'Entering Quiz...'
+                                        : 'Offline'}
+                              </p>
+                            </div>
+                            {st.lockedOut && alertMatch ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  soundFx.playCorrect();
+                                  void onAllowStudent(alertMatch);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-red-600 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                              >
+                                Allow
+                              </button>
+                            ) : (
+                              <span
+                                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                                  st.lockedOut
+                                    ? 'bg-red-500'
+                                    : rec
+                                      ? 'bg-[#1E5B3A]'
+                                      : inQuiz
+                                        ? 'bg-[#EA7A26] animate-pulse'
+                                        : 'bg-stone-300'
+                                }`}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {showActiveAnswerKey && activeSessionDeck && (
+                    <div className="pt-3 border-t border-[#E5DEC9] grid grid-cols-1 md:grid-cols-2 gap-2 max-h-60 overflow-y-auto">
+                      {activeSessionDeck.questions.map((qItem, qIdx) => (
+                        <div key={qItem.id || qIdx} className="p-2.5 rounded-xl bg-white border border-[#E5DEC9]">
+                          <p className="font-bold text-[#172A1E]">
+                            Q{qIdx + 1}. {qItem.prompt}
+                          </p>
+                          <p className="font-semibold text-[#1E5B3A] mt-0.5">
+                            Answer: {qItem.answer}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <span className="font-semibold text-[#EA7A26] tabular-nums">
-                  {
-                    allStudents.filter(
-                      (st) =>
-                        (st.section || '').trim() === activeSessionForTarget.section.trim() &&
-                        getStudentPresence(st, nowMs).isOnline &&
-                        st.activeGame === `Playing: ${activeSessionForTarget.gameTitle}`
-                    ).length
-                  }{' '}
-                  students inside game
-                </span>
-              </div>
-            )}
+              );
+            })()}
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
               {isAdmin && (
@@ -2811,15 +2914,12 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
               {questions.map((q, idx) => {
                 const qType: QuestionType = q.questionType || 'multiple_choice';
                 const enumItems = q.enumerationItems && q.enumerationItems.length > 0 ? q.enumerationItems : ['', ''];
-                const cluePanels: CluePanel[] =
-                  q.cluePanels && q.cluePanels.length >= 4
-                    ? q.cluePanels.slice(0, 4)
-                    : [
-                        { label: '', emoji: '🔍' },
-                        { label: '', emoji: '💡' },
-                        { label: '', emoji: '📚' },
-                        { label: '', emoji: '🧩' },
-                      ];
+                const panelTargetCount = q.cluePanels && q.cluePanels.length >= 6 ? 6 : 4;
+                const cluePanels: CluePanel[] = Array.from({ length: panelTargetCount }, (_, pIdx) => ({
+                  label: q.cluePanels?.[pIdx]?.label || '',
+                  emoji: q.cluePanels?.[pIdx]?.emoji || ['🔍', '💡', '📚', '🧩', '🧭', '⚡'][pIdx],
+                  imageUrl: q.cluePanels?.[pIdx]?.imageUrl,
+                }));
 
                 return (
                   <div key={q.id} className="p-4 rounded-2xl bg-[#FAF8F2] border border-[#E5DEC9] space-y-3">
@@ -2994,12 +3094,37 @@ export const TeacherMonitor: React.FC<TeacherMonitorProps> = ({
                       </div>
                     )}
 
-                    {/* 4 Pics 1 Word Visual Clue Editor */}
+                    {/* 4/6 Pics 1 Word Visual Clue Editor */}
                     {qType === 'four_pics' && (
                       <div className="p-3 rounded-xl bg-white border border-[#E5DEC9] space-y-2.5">
-                        <p className="text-xs font-bold text-[#EA7A26]">
-                          4 Picture Clue Panels (Upload photos or pick visual icons + short captions)
-                        </p>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-bold text-[#EA7A26]">
+                            {cluePanels.length} Picture Clue Panels (Upload photos or pick visual icons + short captions)
+                          </p>
+                          <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[#FAF8F2] border border-[#E5DEC9]">
+                            {([4, 6] as const).map((cnt) => (
+                              <button
+                                key={cnt}
+                                type="button"
+                                onClick={() => {
+                                  const resized: CluePanel[] = Array.from({ length: cnt }, (_, pIdx) => ({
+                                    label: cluePanels[pIdx]?.label || '',
+                                    emoji: cluePanels[pIdx]?.emoji || ['🔍', '💡', '📚', '🧩', '🧭', '⚡'][pIdx],
+                                    imageUrl: cluePanels[pIdx]?.imageUrl,
+                                  }));
+                                  updateQuestion(idx, { cluePanels: resized });
+                                }}
+                                className={`px-2 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                                  cluePanels.length === cnt
+                                    ? 'bg-[#EA7A26] text-white'
+                                    : 'text-[#4D6354] hover:text-[#172A1E]'
+                                }`}
+                              >
+                                {cnt} Pics {cnt === 6 ? '(Hard)' : ''}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                           {cluePanels.map((panel, pIdx) => (
                             <div

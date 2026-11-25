@@ -1,4 +1,10 @@
 {
+  "firestore": [
+    {
+      "database": "ai-studio-863712bf-3177-42d0-aaf9-24225dcb556c",
+      "rules": "firestore.rules"
+    }
+  ],
   "hosting": {
     "site": "lorenzone",
     "public": "dist",
@@ -15,3 +21,4 @@
     ]
   }
 }
+

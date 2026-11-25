@@ -58,9 +58,10 @@ function pickSubjectEmoji(subjectOrCategory: string): string {
 
 export function getCluePanelsForQuestion(q: QuizQuestion): CluePanel[] {
   if (q.cluePanels && q.cluePanels.length >= 4) {
-    return q.cluePanels.slice(0, 4).map((p, idx) => ({
+    const count = q.cluePanels.length >= 6 ? 6 : 4;
+    return q.cluePanels.slice(0, count).map((p, idx) => ({
       label: p.label?.trim() || `Clue ${idx + 1}`,
-      emoji: p.emoji?.trim() || ['🔍', '💡', '📚', '🧩'][idx],
+      emoji: p.emoji?.trim() || ['🔍', '💡', '📚', '🧩', '🧭', '⚡'][idx],
       imageUrl: p.imageUrl,
     }));
   }
@@ -71,8 +72,6 @@ export function getCluePanelsForQuestion(q: QuizQuestion): CluePanel[] {
     q.prompt.replace(/_{3,}/g, '[ ? ]').trim().slice(0, 44) +
     (q.prompt.trim().length > 44 ? '…' : '');
   const hintSnippet = q.hint?.trim() || `Think about ${category}`;
-  const firstLetter = cleanWord[0] || '?';
-  const lastLetter = cleanWord[cleanWord.length - 1] || '?';
 
   return [
     {
@@ -88,8 +87,8 @@ export function getCluePanelsForQuestion(q: QuizQuestion): CluePanel[] {
       emoji: '🔎',
     },
     {
-      label: `${cleanWord.length} chars · ${firstLetter}___${lastLetter}`,
-      emoji: '🔤',
+      label: `${cleanWord.length}-Character Term`,
+      emoji: '🧩',
     },
   ];
 }
@@ -140,10 +139,10 @@ export function sanitizeQuestionForFirestore(q: QuizQuestion, fallbackCategory: 
   }
 
   if (q.cluePanels && q.cluePanels.length > 0) {
-    cleanQuestion.cluePanels = q.cluePanels.slice(0, 4).map((panel, pIdx) => {
+    cleanQuestion.cluePanels = q.cluePanels.slice(0, 6).map((panel, pIdx) => {
       const nextPanel: CluePanel = {
         label: (panel.label || '').trim().slice(0, 48) || `Clue ${pIdx + 1}`,
-        emoji: (panel.emoji || '').trim().slice(0, 8) || ['🔍', '💡', '📚', '🧩'][pIdx],
+        emoji: (panel.emoji || '').trim().slice(0, 8) || ['🔍', '💡', '📚', '🧩', '🧭', '⚡'][pIdx],
       };
       if (panel.imageUrl && panel.imageUrl.trim()) {
         nextPanel.imageUrl = panel.imageUrl.trim();
