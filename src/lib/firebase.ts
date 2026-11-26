@@ -1,11 +1,33 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+} from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 const databaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
-export const db = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+
+function createFirestoreDb() {
+  if (typeof window === 'undefined') {
+    return databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+  }
+  try {
+    const settings = {
+      experimentalForceLongPolling: true,
+    };
+    return databaseId
+      ? initializeFirestore(app, settings, databaseId)
+      : initializeFirestore(app, settings);
+  } catch {
+    return databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+  }
+}
+
+export const db = createFirestoreDb();
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
