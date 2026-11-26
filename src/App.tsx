@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertOctagon, Lock } from 'lucide-react';
 import {
-  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithCredential,
@@ -191,109 +190,28 @@ function LorenzoneApp() {
     }
   }, [theme]);
 
-  const explicitSignOutRef = useRef(false);
-
-  // Firebase Auth listener + redirect result diagnostic check
+  // Firebase Auth listener
   useEffect(() => {
-    let eventSeq = 0;
-    console.info('[AuthDebug] Registering onAuthStateChanged listener', {
-      timestamp: new Date().toISOString(),
-      perfMs: Math.round(performance.now()),
-      currentUserUid: auth.currentUser?.uid ?? null,
-      authDomain: auth.app.options.authDomain,
-      href: typeof window !== 'undefined' ? window.location.href : '',
-      inIframe: typeof window !== 'undefined' ? window.self !== window.top : false,
-    });
-
-    void getRedirectResult(auth)
-      .then((redirectResult) => {
-        if (redirectResult?.user) {
-          console.info('[AuthDebug] getRedirectResult returned user', {
-            timestamp: new Date().toISOString(),
-            uid: redirectResult.user.uid,
-            email: redirectResult.user.email,
-            emailVerified: redirectResult.user.emailVerified,
-            providerId: redirectResult.providerId,
-            operationType: redirectResult.operationType,
-          });
-          setUser(redirectResult.user);
-          setAuthReady(true);
-        } else {
-          console.info('[AuthDebug] getRedirectResult returned null (no pending redirect session)', {
-            timestamp: new Date().toISOString(),
-            currentUserUid: auth.currentUser?.uid ?? null,
-          });
-        }
-      })
-      .catch((redirectErr) => {
-        const errObj = redirectErr as { code?: unknown; message?: unknown; customData?: unknown };
-        console.error('[AuthDebug] getRedirectResult failed', {
-          timestamp: new Date().toISOString(),
-          code: errObj?.code ?? null,
-          message: redirectErr instanceof Error ? redirectErr.message : String(redirectErr),
-          customData: errObj?.customData ?? null,
-        });
-      });
-
-    const unsub = onAuthStateChanged(
-      auth,
-      (firebaseUser) => {
-        eventSeq += 1;
-        console.info('[AuthDebug] onAuthStateChanged fired', {
-          seq: eventSeq,
-          timestamp: new Date().toISOString(),
-          perfMs: Math.round(performance.now()),
-          hasUser: Boolean(firebaseUser),
-          uid: firebaseUser?.uid ?? null,
-          email: firebaseUser?.email ?? null,
-          emailVerified: firebaseUser?.emailVerified ?? null,
-          isAnonymous: firebaseUser?.isAnonymous ?? null,
-          providers: firebaseUser?.providerData?.map((p) => p.providerId) ?? [],
-          creationTime: firebaseUser?.metadata?.creationTime ?? null,
-          lastSignInTime: firebaseUser?.metadata?.lastSignInTime ?? null,
-          authCurrentUserUid: auth.currentUser?.uid ?? null,
-          matchesAuthCurrentUser: (auth.currentUser?.uid ?? null) === (firebaseUser?.uid ?? null),
-          explicitSignOut: explicitSignOutRef.current,
-        });
-
-        setUser(firebaseUser);
-        setAuthReady(true);
-        if (!firebaseUser) {
-          console.warn('[AuthDebug] No active Firebase user — resetting local profile & session state', {
-            seq: eventSeq,
-            timestamp: new Date().toISOString(),
-            authCurrentUserUid: auth.currentUser?.uid ?? null,
-          });
-          setMyProfile(null);
-          setProfileLoaded(false);
-          setAuthorizedRole(null);
-          setAuthzChecked(false);
-          setAuthorizedFaculty([]);
-          setOwnDecks([]);
-          setPublishedDecks([]);
-          setMyIdVerification(null);
-          setMyIdVerificationLoaded(false);
-          setSchoolIdVerifications([]);
-          setMySectionRequest(null);
-          setSectionChangeRequests([]);
-          setAttendanceRecords([]);
-        }
-        explicitSignOutRef.current = false;
-      },
-      (authErr) => {
-        console.error('[AuthDebug] onAuthStateChanged error callback', {
-          timestamp: new Date().toISOString(),
-          error: authErr instanceof Error ? authErr.message : String(authErr),
-          authErr,
-        });
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setAuthReady(true);
+      if (!firebaseUser) {
+        setMyProfile(null);
+        setProfileLoaded(false);
+        setAuthorizedRole(null);
+        setAuthzChecked(false);
+        setAuthorizedFaculty([]);
+        setOwnDecks([]);
+        setPublishedDecks([]);
+        setMyIdVerification(null);
+        setMyIdVerificationLoaded(false);
+        setSchoolIdVerifications([]);
+        setMySectionRequest(null);
+        setSectionChangeRequests([]);
+        setAttendanceRecords([]);
       }
-    );
-    return () => {
-      console.info('[AuthDebug] Unsubscribing onAuthStateChanged listener', {
-        timestamp: new Date().toISOString(),
-      });
-      unsub();
-    };
+    });
+    return () => unsub();
   }, []);
 
   const toMillis = (ts: unknown): number => {
@@ -307,11 +225,6 @@ function LorenzoneApp() {
   // Load current user's profile and faculty authorization status
   useEffect(() => {
     if (!authReady || !user) {
-      console.info('[AuthDebug] Profile/authz effect skipped or cleared', {
-        timestamp: new Date().toISOString(),
-        authReady,
-        userUid: user?.uid ?? null,
-      });
       setMyProfile(null);
       setProfileLoaded(false);
       setAuthorizedRole(null);
@@ -320,22 +233,14 @@ function LorenzoneApp() {
     }
 
     const emailLower = (user.email || '').toLowerCase();
-    console.info('[AuthDebug] Loading authz & publicProfile', {
-      timestamp: new Date().toISOString(),
-      uid: user.uid,
-      emailLower,
-      emailVerified: user.emailVerified,
-    });
 
     const checkAuthz = async () => {
       if (emailLower === 'maxsison2@gmail.com') {
-        console.info('[AuthDebug] checkAuthz matched primary admin');
         setAuthorizedRole('admin');
         setAuthzChecked(true);
         return;
       }
       if (!emailLower) {
-        console.warn('[AuthDebug] checkAuthz: user email missing');
         setAuthorizedRole(null);
         setAuthzChecked(true);
         return;
@@ -344,16 +249,11 @@ function LorenzoneApp() {
         const facSnap = await getDoc(doc(db, 'authorizedFaculty', emailLower));
         if (facSnap.exists()) {
           const facData = facSnap.data() as AuthorizedFaculty;
-          console.info('[AuthDebug] checkAuthz found authorizedFaculty doc', { role: facData.role });
           setAuthorizedRole(facData.role);
         } else {
-          console.info('[AuthDebug] checkAuthz: no authorizedFaculty doc for email');
           setAuthorizedRole(null);
         }
-      } catch (err) {
-        console.warn('[AuthDebug] checkAuthz error (defaulting to null)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+      } catch {
         setAuthorizedRole(null);
       } finally {
         setAuthzChecked(true);
@@ -365,26 +265,10 @@ function LorenzoneApp() {
     const unsubMyProfile = onSnapshot(
       myProfileRef,
       (snap) => {
-        const data = snap.exists() ? (snap.data() as PublicProfile) : null;
-        console.info('[AuthDebug] publicProfiles snapshot received', {
-          timestamp: new Date().toISOString(),
-          uid: user.uid,
-          exists: snap.exists(),
-          role: data?.role ?? null,
-          approvalStatus: data?.approvalStatus ?? null,
-          section: data?.section ?? null,
-        });
-        setMyProfile(data);
+        setMyProfile(snap.exists() ? (snap.data() as PublicProfile) : null);
         setProfileLoaded(true);
       },
-      (err) => {
-        console.error('[AuthDebug] publicProfiles onSnapshot error', {
-          timestamp: new Date().toISOString(),
-          uid: user.uid,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        handleFirestoreError(err, OperationType.GET, `publicProfiles/${user.uid}`);
-      }
+      (err) => handleFirestoreError(err, OperationType.GET, `publicProfiles/${user.uid}`)
     );
 
     return () => {
@@ -927,23 +811,11 @@ function LorenzoneApp() {
     if (!authBridgeNonce) return;
     setBridgeLoading(true);
     setBridgeError(null);
-    console.info('[AuthDebug] Bridge popup starting top-level signInWithPopup', {
-      timestamp: new Date().toISOString(),
-      nonce: authBridgeNonce,
-      inIframe: window.self !== window.top,
-      origin: window.location.origin,
-    });
     try {
       const cred = await signInWithPopup(auth, googleProvider);
       const oauthCred = GoogleAuthProvider.credentialFromResult(cred);
       const idToken = oauthCred?.idToken ?? null;
       const accessToken = oauthCred?.accessToken ?? null;
-      console.info('[AuthDebug] Bridge popup signInWithPopup succeeded', {
-        timestamp: new Date().toISOString(),
-        uid: cred?.user?.uid ?? null,
-        hasIdToken: Boolean(idToken),
-        hasAccessToken: Boolean(accessToken),
-      });
       if (!idToken && !accessToken) {
         throw new Error('Google Sign-In completed without an OAuth token. Please try opening LORENZONE in a new tab.');
       }
@@ -974,15 +846,6 @@ function LorenzoneApp() {
         window.close();
       }, 350);
     } catch (err) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code || '')
-          : '';
-      console.error('[AuthDebug] Bridge popup signInWithPopup failed', {
-        timestamp: new Date().toISOString(),
-        code,
-        message: err instanceof Error ? err.message : String(err),
-      });
       setBridgeError(formatFirebaseAuthError(err));
     } finally {
       setBridgeLoading(false);
@@ -991,17 +854,6 @@ function LorenzoneApp() {
 
   const handleGoogleLogin = async () => {
     const inIframe = typeof window !== 'undefined' && window.self !== window.top;
-    console.info('[AuthDebug] handleGoogleLogin started', {
-      timestamp: new Date().toISOString(),
-      perfMs: Math.round(performance.now()),
-      portalMode,
-      origin: typeof window !== 'undefined' ? window.location.origin : '',
-      hostname: typeof window !== 'undefined' ? window.location.hostname : '',
-      inIframe,
-      authDomain: auth.app.options.authDomain,
-      authReady,
-      currentUserBeforeLogin: auth.currentUser?.uid ?? null,
-    });
     setAuthLoading(true);
     setAuthError(null);
 
@@ -1025,7 +877,6 @@ function LorenzoneApp() {
       );
 
       if (!bridgeWin) {
-        console.warn('[AuthDebug] Bridge popup was blocked by browser');
         setAuthError(
           'Your browser blocked the Google Sign-In popup. Please allow popups for this site or click "Open LORENZONE in a new tab" below.'
         );
@@ -1050,32 +901,16 @@ function LorenzoneApp() {
         bridgeCleanupRef.current = null;
       };
 
-      const finishWithTokens = async (idToken: string | null, accessToken: string | null, source: string) => {
+      const finishWithTokens = async (idToken: string | null, accessToken: string | null) => {
         if (settled) return;
         settled = true;
         cleanupBridge();
-        console.info('[AuthDebug] Auth bridge received tokens, calling signInWithCredential', {
-          timestamp: new Date().toISOString(),
-          source,
-          hasIdToken: Boolean(idToken),
-          hasAccessToken: Boolean(accessToken),
-        });
         try {
           const credential = GoogleAuthProvider.credential(idToken ?? undefined, accessToken ?? undefined);
           const cred = await signInWithCredential(auth, credential);
-          console.info('[AuthDebug] signInWithCredential succeeded', {
-            timestamp: new Date().toISOString(),
-            uid: cred.user.uid,
-            email: cred.user.email,
-            emailVerified: cred.user.emailVerified,
-          });
           setUser(cred.user);
           setAuthReady(true);
         } catch (credErr) {
-          console.error('[AuthDebug] signInWithCredential failed', {
-            timestamp: new Date().toISOString(),
-            error: credErr instanceof Error ? credErr.message : String(credErr),
-          });
           setAuthError(formatFirebaseAuthError(credErr));
         } finally {
           setAuthLoading(false);
@@ -1091,7 +926,7 @@ function LorenzoneApp() {
           accessToken?: string | null;
         } | null;
         if (payload?.type === 'lz-auth-bridge' && payload.nonce === nonce) {
-          void finishWithTokens(payload.idToken ?? null, payload.accessToken ?? null, 'postMessage');
+          void finishWithTokens(payload.idToken ?? null, payload.accessToken ?? null);
         }
       };
 
@@ -1112,7 +947,7 @@ function LorenzoneApp() {
           .then((r) => (r.ok ? r.json() : null))
           .then((data: { ready?: boolean; idToken?: string | null; accessToken?: string | null } | null) => {
             if (data?.ready && !settled) {
-              void finishWithTokens(data.idToken ?? null, data.accessToken ?? null, 'server-poll');
+              void finishWithTokens(data.idToken ?? null, data.accessToken ?? null);
               return;
             }
             if (bridgeWin.closed && !settled && closedGraceTimer === null) {
@@ -1122,11 +957,10 @@ function LorenzoneApp() {
                   .then((r) => (r.ok ? r.json() : null))
                   .then((finalData: { ready?: boolean; idToken?: string | null; accessToken?: string | null } | null) => {
                     if (finalData?.ready && !settled) {
-                      void finishWithTokens(finalData.idToken ?? null, finalData.accessToken ?? null, 'server-final-poll');
+                      void finishWithTokens(finalData.idToken ?? null, finalData.accessToken ?? null);
                     } else if (!settled) {
                       settled = true;
                       cleanupBridge();
-                      console.warn('[AuthDebug] Bridge window closed before completing sign-in');
                       setAuthError('Google Sign-In was closed before finishing. Click Continue with Google to try again.');
                       setAuthLoading(false);
                     }
@@ -1151,58 +985,18 @@ function LorenzoneApp() {
 
     try {
       const cred = await signInWithPopup(auth, googleProvider);
-      console.info('[AuthDebug] signInWithPopup resolved', {
-        timestamp: new Date().toISOString(),
-        perfMs: Math.round(performance.now()),
-        uid: cred?.user?.uid ?? null,
-        email: cred?.user?.email ?? null,
-        emailVerified: cred?.user?.emailVerified ?? null,
-        providerId: cred?.providerId ?? null,
-        operationType: cred?.operationType ?? null,
-        authCurrentUserAfterPopup: auth.currentUser?.uid ?? null,
-      });
       if (cred?.user) {
         setUser(cred.user);
         setAuthReady(true);
-      } else {
-        console.warn('[AuthDebug] signInWithPopup resolved without cred.user', { cred });
       }
     } catch (err) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code || '')
-          : '';
-      const host = typeof window !== 'undefined' ? window.location.hostname : '';
-      const customData =
-        typeof err === 'object' && err !== null && 'customData' in err
-          ? (err as { customData?: unknown }).customData
-          : undefined;
-      console.error('[AuthDebug] signInWithPopup failed', {
-        timestamp: new Date().toISOString(),
-        perfMs: Math.round(performance.now()),
-        code,
-        message: err instanceof Error ? err.message : String(err),
-        customData,
-        host,
-        authCurrentUserAfterError: auth.currentUser?.uid ?? null,
-      });
       setAuthError(formatFirebaseAuthError(err));
     } finally {
-      console.info('[AuthDebug] handleGoogleLogin finished', {
-        timestamp: new Date().toISOString(),
-        authCurrentUserAtFinally: auth.currentUser?.uid ?? null,
-      });
       setAuthLoading(false);
     }
   };
 
   const handleFullSignOut = async () => {
-    explicitSignOutRef.current = true;
-    console.info('[AuthDebug] handleFullSignOut called', {
-      timestamp: new Date().toISOString(),
-      uid: user?.uid ?? null,
-      hasProfile: Boolean(myProfile),
-    });
     if (user && myProfile) {
       try {
         await updateDoc(doc(db, 'publicProfiles', user.uid), {
@@ -1215,10 +1009,6 @@ function LorenzoneApp() {
       }
     }
     await signOut(auth);
-    console.info('[AuthDebug] signOut(auth) completed', {
-      timestamp: new Date().toISOString(),
-      authCurrentUserAfterSignOut: auth.currentUser?.uid ?? null,
-    });
   };
 
   const handleCompleteOnboarding = async (data: {
@@ -2345,52 +2135,6 @@ function LorenzoneApp() {
     soundFx.setMuted(next);
     setMuted(next);
   };
-
-  const currentAuthGateView = showSplash
-    ? 'SplashScreen'
-    : !authReady
-      ? 'Connecting'
-      : !user
-        ? 'AuthScreen'
-        : !profileLoaded || !authzChecked
-          ? 'LoadingProfile'
-          : !myProfile
-            ? 'OnboardingStudio'
-            : isUnapprovedStudent
-              ? 'PendingApprovalScreen'
-              : 'MainApp';
-
-  useEffect(() => {
-    console.info('[AuthDebug] Render gate state', {
-      timestamp: new Date().toISOString(),
-      view: currentAuthGateView,
-      showSplash,
-      authReady,
-      userUid: user?.uid ?? null,
-      authCurrentUserUid: auth.currentUser?.uid ?? null,
-      profileLoaded,
-      authzChecked,
-      authorizedRole,
-      hasProfile: Boolean(myProfile),
-      profileRole: myProfile?.role ?? null,
-      approvalStatus: myProfile?.approvalStatus ?? null,
-      isUnapprovedStudent,
-      authLoading,
-      hasAuthError: Boolean(authError),
-    });
-  }, [
-    currentAuthGateView,
-    showSplash,
-    authReady,
-    user?.uid,
-    profileLoaded,
-    authzChecked,
-    authorizedRole,
-    myProfile,
-    isUnapprovedStudent,
-    authLoading,
-    authError,
-  ]);
 
   if (authBridgeNonce) {
     return (
