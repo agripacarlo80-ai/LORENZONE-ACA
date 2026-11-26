@@ -1,12 +1,12 @@
 {
-  "projectId": "micro-impact-rlvvl",
-  "appId": "1:180021945567:web:b12c170a82c0b477f8f56a",
-  "apiKey": "AIzaSyCyzhtMQyybKBzQCqGqgSO4DJme3kUNJv4",
-  "authDomain": "micro-impact-rlvvl.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-lorenzoneaca-df2feae1-8ad5-4e93-a6cd-dc0293c0ff8d",
-  "storageBucket": "micro-impact-rlvvl.firebasestorage.app",
-  "messagingSenderId": "180021945567",
+  "projectId": "gen-lang-client-0500660076",
+  "appId": "1:979411317771:web:eeb4e1dae70a2c488f830e",
+  "apiKey": "AIzaSyAgWZ5VQgQcK5s5gkLF_u7IcvkmPce-GPo",
+  "authDomain": "gen-lang-client-0500660076.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-863712bf-3177-42d0-aaf9-24225dcb556c",
+  "storageBucket": "gen-lang-client-0500660076.firebasestorage.app",
+  "messagingSenderId": "979411317771",
   "measurementId": "",
-  "oAuthClientId": "180021945567-u86i64f89vksmhep7kp21fjn0pstai50.apps.googleusercontent.com",
+  "oAuthClientId": "979411317771-6jo9s89h4qn1pvc55h67ddud9cun80u0.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }
