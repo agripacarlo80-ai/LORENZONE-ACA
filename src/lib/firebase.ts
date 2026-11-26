@@ -10,6 +10,39 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
+if (typeof window !== 'undefined') {
+  let localStorageOk = false;
+  let sessionStorageOk = false;
+  try {
+    const k = '__lz_storage_test__';
+    window.localStorage.setItem(k, '1');
+    window.localStorage.removeItem(k);
+    localStorageOk = true;
+  } catch {
+    localStorageOk = false;
+  }
+  try {
+    const k = '__lz_session_test__';
+    window.sessionStorage.setItem(k, '1');
+    window.sessionStorage.removeItem(k);
+    sessionStorageOk = true;
+  } catch {
+    sessionStorageOk = false;
+  }
+  console.info('[AuthDebug] Firebase initialized', {
+    timestamp: new Date().toISOString(),
+    projectId: firebaseConfig.projectId,
+    authDomain: firebaseConfig.authDomain,
+    firestoreDatabaseId: databaseId || '(default)',
+    origin: window.location.origin,
+    inIframe: window.self !== window.top,
+    localStorageOk,
+    sessionStorageOk,
+    hasIndexedDB: typeof window.indexedDB !== 'undefined',
+    initialCurrentUserUid: auth.currentUser?.uid ?? null,
+  });
+}
+
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
