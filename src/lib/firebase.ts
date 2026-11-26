@@ -85,15 +85,23 @@ export function handleFirestoreError(
 }
 
 export async function testConnection(): Promise<boolean> {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await getDocFromServer(doc(db, 'test', 'connection'));
+      return true;
+    } catch (error) {
+      const isOffline = error instanceof Error && error.message.includes('the client is offline');
+      if (isOffline && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        continue;
+      }
+      if (isOffline) {
+        console.error('Please check your Firebase configuration.');
+      }
+      return false;
     }
-    return false;
   }
+  return false;
 }
 
 void testConnection();

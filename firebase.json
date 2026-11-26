@@ -6,7 +6,6 @@
     }
   ],
   "hosting": {
-    "site": "lorenzone",
     "public": "dist",
     "ignore": [
       "firebase.json",
