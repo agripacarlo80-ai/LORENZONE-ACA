@@ -86,12 +86,89 @@ function normalizeFourPicsWord(rawWord: string): string {
   return rawWord.toUpperCase().replace(/[^A-Z0-9\s]/g, '').trim().slice(0, 14) || 'CONCEPT';
 }
 
+const AUTH_BRIDGE_TTL_MS = 120_000;
+const AUTH_BRIDGE_NONCE_RE = /^[a-zA-Z0-9_-]{24,64}$/;
+const authBridgeStore = new Map<
+  string,
+  { idToken: string | null; accessToken: string | null; expiresAt: number }
+>();
+
+function pruneAuthBridgeStore(now: number = Date.now()) {
+  for (const [key, entry] of authBridgeStore.entries()) {
+    if (entry.expiresAt <= now) {
+      authBridgeStore.delete(key);
+    }
+  }
+  while (authBridgeStore.size > 500) {
+    const oldestKey = authBridgeStore.keys().next().value;
+    if (!oldestKey) break;
+    authBridgeStore.delete(oldestKey);
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true, service: 'lorenzone-server' });
+  });
+
+  app.post('/api/auth-bridge', (req: Request, res: Response) => {
+    const body = (req.body || {}) as {
+      nonce?: unknown;
+      idToken?: unknown;
+      accessToken?: unknown;
+    };
+    const nonce = typeof body.nonce === 'string' ? body.nonce.trim() : '';
+    if (!AUTH_BRIDGE_NONCE_RE.test(nonce)) {
+      res.status(400).json({ error: 'Invalid auth bridge nonce.' });
+      return;
+    }
+    const idToken =
+      typeof body.idToken === 'string' && body.idToken.length > 0 && body.idToken.length <= 8192
+        ? body.idToken
+        : null;
+    const accessToken =
+      typeof body.accessToken === 'string' &&
+      body.accessToken.length > 0 &&
+      body.accessToken.length <= 8192
+        ? body.accessToken
+        : null;
+    if (!idToken && !accessToken) {
+      res.status(400).json({ error: 'Missing OAuth token payload.' });
+      return;
+    }
+    pruneAuthBridgeStore();
+    authBridgeStore.set(nonce, {
+      idToken,
+      accessToken,
+      expiresAt: Date.now() + AUTH_BRIDGE_TTL_MS,
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true });
+  });
+
+  app.get('/api/auth-bridge/:nonce', (req: Request, res: Response) => {
+    const nonce = typeof req.params.nonce === 'string' ? req.params.nonce.trim() : '';
+    if (!AUTH_BRIDGE_NONCE_RE.test(nonce)) {
+      res.status(400).json({ error: 'Invalid auth bridge nonce.' });
+      return;
+    }
+    pruneAuthBridgeStore();
+    const entry = authBridgeStore.get(nonce);
+    res.setHeader('Cache-Control', 'no-store');
+    if (!entry || entry.expiresAt <= Date.now()) {
+      authBridgeStore.delete(nonce);
+      res.json({ ready: false });
+      return;
+    }
+    authBridgeStore.delete(nonce);
+    res.json({
+      ready: true,
+      idToken: entry.idToken,
+      accessToken: entry.accessToken,
+    });
   });
 
   app.post('/api/generate-pptx', async (req: Request, res: Response) => {

@@ -237,14 +237,98 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               <p className="font-semibold text-[#172A1E]">
                 {portalMode === 'faculty' ? 'Secret Code Protected Access' : 'PII & Anti-Cheat Privacy'}
               </p>
-            <p className="mt-0.5 leading-relaxed">
+              <p className="mt-0.5 leading-relaxed">
                 {portalMode === 'faculty'
                   ? 'Multiple teachers and co-admins can sign in using their Gmail and the academy Secret Code.'
                   : 'Verified Google Sign-In and School ID checks ensure only enrolled SLA students can access campus rooms.'}
               </p>
+              {typeof window !== 'undefined' && window.self !== window.top && (
+                <p className="mt-2">
+                  Trouble with embedded sign-in?{' '}
+                  <a
+                    href={window.location.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold text-[#1E5B3A] underline hover:text-[#EA7A26]"
+                  >
+                    Open LORENZONE in a new tab
+                  </a>
+                </p>
+              )}
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+};
+
+interface AuthBridgeScreenProps {
+  onTriggerSignIn: () => Promise<void>;
+  loading: boolean;
+  completed: boolean;
+  error: string | null;
+}
+
+export const AuthBridgeScreen: React.FC<AuthBridgeScreenProps> = ({
+  onTriggerSignIn,
+  loading,
+  completed,
+  error,
+}) => {
+  return (
+    <div className="min-h-screen bg-[#FAF8F2] flex items-center justify-center p-6">
+      <div className="max-w-md w-full bg-white rounded-3xl border border-[#E5DEC9] p-8 shadow-sm text-center space-y-5">
+        <img
+          src="/assets/aistudio/fd5c8fff-13fe-46ee-baba-021f77749eb4_5f87432b.jpg"
+          alt="San Lorenzo Academy Logo"
+          className="w-16 h-16 mx-auto rounded-full object-cover border-2 border-[#EA7A26]/70 bg-white shadow-sm"
+        />
+        <div>
+          <p className="text-xs font-semibold text-[#EA7A26]">San Lorenzo Academy, Inc.</p>
+          <h1 className="text-2xl font-extrabold text-[#172A1E] mt-1">
+            Complete Google Sign-In
+          </h1>
+          <p className="text-xs text-[#4D6354] mt-2 leading-relaxed">
+            {completed
+              ? 'Sign-in succeeded! Returning to LORENZONE now — you may close this window if it does not close automatically.'
+              : 'Click below to sign in with your Google account in this top-level window and return directly to LORENZONE.'}
+          </p>
+        </div>
+
+        {error && (
+          <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 text-left">
+            {error}
+          </div>
+        )}
+
+        {!completed ? (
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => {
+              soundFx.playClick();
+              void onTriggerSignIn();
+            }}
+            className="w-full py-3.5 px-5 rounded-xl bg-[#1E5B3A] hover:bg-[#17462C] text-white font-semibold text-sm flex items-center justify-center gap-3 transition-colors cursor-pointer disabled:opacity-60"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="#FFFFFF"
+                d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27 3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10 5.35 0 9.25-3.67 9.25-9.09 0-1.15-.15-1.81-.15-1.81z"
+              />
+            </svg>
+            {loading ? 'Signing in with Google...' : 'Continue with Google'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => window.close()}
+            className="w-full py-3 px-5 rounded-xl bg-[#EA7A26] hover:bg-[#D46818] text-white font-semibold text-sm cursor-pointer"
+          >
+            Close Window
+          </button>
+        )}
       </div>
     </div>
   );

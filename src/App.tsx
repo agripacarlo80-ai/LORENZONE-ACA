@@ -1,6 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertOctagon, Lock } from 'lucide-react';
-import { getRedirectResult, onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
+import {
+  getRedirectResult,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithCredential,
+  signInWithPopup,
+  signOut,
+  User,
+} from 'firebase/auth';
 import {
   collection,
   deleteDoc,
@@ -48,6 +56,7 @@ import {
   UserRole,
 } from './types';
 import {
+  AuthBridgeScreen,
   AuthScreen,
   OnboardingStudio,
   PendingApprovalScreen,
@@ -95,8 +104,27 @@ function buildAttendanceDocId(dateStr: string, studentId: string): string {
   return `att_${safeDate}_${studentId}`.slice(0, 128);
 }
 
+function generateAuthNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function getAuthBridgeNonceFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = new URLSearchParams(window.location.search).get('auth_bridge');
+  return raw && /^[a-zA-Z0-9_-]{24,64}$/.test(raw) ? raw : null;
+}
+
 function LorenzoneApp() {
-  const [showSplash, setShowSplash] = useState(true);
+  const authBridgeNonce = useMemo(() => getAuthBridgeNonceFromUrl(), []);
+  const [bridgeLoading, setBridgeLoading] = useState(false);
+  const [bridgeCompleted, setBridgeCompleted] = useState(false);
+  const [bridgeError, setBridgeError] = useState<string | null>(null);
+  const bridgePollRef = useRef<number | null>(null);
+  const bridgeCleanupRef = useRef<(() => void) | null>(null);
+
+  const [showSplash, setShowSplash] = useState(() => !getAuthBridgeNonceFromUrl());
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
@@ -862,20 +890,265 @@ function LorenzoneApp() {
     isUnapprovedStudent,
   ]);
 
+  useEffect(() => {
+    return () => {
+      if (bridgePollRef.current !== null) {
+        window.clearInterval(bridgePollRef.current);
+      }
+      bridgeCleanupRef.current?.();
+    };
+  }, []);
+
+  const formatFirebaseAuthError = (err: unknown): string => {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code || '')
+        : '';
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    if (code === 'auth/unauthorized-domain') {
+      return `This website address (${host}) is not authorized in Firebase Authentication yet. Open Firebase Console → Authentication → Settings → Authorized domains and add "${host}".`;
+    }
+    if (code === 'auth/popup-blocked') {
+      return 'Your browser blocked the Google Sign-In popup. Please allow popups for this site and try again.';
+    }
+    if (code === 'auth/popup-closed-by-user') {
+      return 'Google Sign-In did not finish before the popup closed. Please try again or open LORENZONE in a new tab.';
+    }
+    if (code === 'auth/operation-not-allowed') {
+      return 'Google Sign-In is disabled in Firebase Console. Enable Google under Authentication → Sign-in method.';
+    }
+    if (code === 'auth/network-request-failed') {
+      return 'Network error while connecting to Google Sign-In. Check your internet connection and try again.';
+    }
+    return err instanceof Error ? err.message : 'Unable to sign in with Google.';
+  };
+
+  const handleBridgePopupSignIn = async () => {
+    if (!authBridgeNonce) return;
+    setBridgeLoading(true);
+    setBridgeError(null);
+    console.info('[AuthDebug] Bridge popup starting top-level signInWithPopup', {
+      timestamp: new Date().toISOString(),
+      nonce: authBridgeNonce,
+      inIframe: window.self !== window.top,
+      origin: window.location.origin,
+    });
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      const oauthCred = GoogleAuthProvider.credentialFromResult(cred);
+      const idToken = oauthCred?.idToken ?? null;
+      const accessToken = oauthCred?.accessToken ?? null;
+      console.info('[AuthDebug] Bridge popup signInWithPopup succeeded', {
+        timestamp: new Date().toISOString(),
+        uid: cred?.user?.uid ?? null,
+        hasIdToken: Boolean(idToken),
+        hasAccessToken: Boolean(accessToken),
+      });
+      if (!idToken && !accessToken) {
+        throw new Error('Google Sign-In completed without an OAuth token. Please try opening LORENZONE in a new tab.');
+      }
+      const postRes = await fetch('/api/auth-bridge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nonce: authBridgeNonce,
+          idToken,
+          accessToken,
+        }),
+      });
+      if (!postRes.ok) {
+        throw new Error('Could not deliver sign-in token back to LORENZONE.');
+      }
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(
+            { type: 'lz-auth-bridge', nonce: authBridgeNonce, idToken, accessToken },
+            window.location.origin
+          );
+        }
+      } catch {
+        // Server handoff already stored the token
+      }
+      setBridgeCompleted(true);
+      window.setTimeout(() => {
+        window.close();
+      }, 350);
+    } catch (err) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      console.error('[AuthDebug] Bridge popup signInWithPopup failed', {
+        timestamp: new Date().toISOString(),
+        code,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      setBridgeError(formatFirebaseAuthError(err));
+    } finally {
+      setBridgeLoading(false);
+    }
+  };
+
   const handleGoogleLogin = async () => {
+    const inIframe = typeof window !== 'undefined' && window.self !== window.top;
     console.info('[AuthDebug] handleGoogleLogin started', {
       timestamp: new Date().toISOString(),
       perfMs: Math.round(performance.now()),
       portalMode,
       origin: typeof window !== 'undefined' ? window.location.origin : '',
       hostname: typeof window !== 'undefined' ? window.location.hostname : '',
-      inIframe: typeof window !== 'undefined' ? window.self !== window.top : false,
+      inIframe,
       authDomain: auth.app.options.authDomain,
       authReady,
       currentUserBeforeLogin: auth.currentUser?.uid ?? null,
     });
     setAuthLoading(true);
     setAuthError(null);
+
+    if (inIframe) {
+      bridgeCleanupRef.current?.();
+      if (bridgePollRef.current !== null) {
+        window.clearInterval(bridgePollRef.current);
+        bridgePollRef.current = null;
+      }
+
+      const nonce = generateAuthNonce();
+      const bridgeUrl = `${window.location.origin}/?auth_bridge=${encodeURIComponent(nonce)}`;
+      const width = 500;
+      const height = 640;
+      const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
+      const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
+      const bridgeWin = window.open(
+        bridgeUrl,
+        'lz_google_auth_bridge',
+        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
+      );
+
+      if (!bridgeWin) {
+        console.warn('[AuthDebug] Bridge popup was blocked by browser');
+        setAuthError(
+          'Your browser blocked the Google Sign-In popup. Please allow popups for this site or click "Open LORENZONE in a new tab" below.'
+        );
+        setAuthLoading(false);
+        return;
+      }
+
+      let settled = false;
+      let closedGraceTimer: number | null = null;
+      const startedAt = Date.now();
+
+      const cleanupBridge = () => {
+        if (bridgePollRef.current !== null) {
+          window.clearInterval(bridgePollRef.current);
+          bridgePollRef.current = null;
+        }
+        if (closedGraceTimer !== null) {
+          window.clearTimeout(closedGraceTimer);
+          closedGraceTimer = null;
+        }
+        window.removeEventListener('message', handleBridgeMessage);
+        bridgeCleanupRef.current = null;
+      };
+
+      const finishWithTokens = async (idToken: string | null, accessToken: string | null, source: string) => {
+        if (settled) return;
+        settled = true;
+        cleanupBridge();
+        console.info('[AuthDebug] Auth bridge received tokens, calling signInWithCredential', {
+          timestamp: new Date().toISOString(),
+          source,
+          hasIdToken: Boolean(idToken),
+          hasAccessToken: Boolean(accessToken),
+        });
+        try {
+          const credential = GoogleAuthProvider.credential(idToken ?? undefined, accessToken ?? undefined);
+          const cred = await signInWithCredential(auth, credential);
+          console.info('[AuthDebug] signInWithCredential succeeded', {
+            timestamp: new Date().toISOString(),
+            uid: cred.user.uid,
+            email: cred.user.email,
+            emailVerified: cred.user.emailVerified,
+          });
+          setUser(cred.user);
+          setAuthReady(true);
+        } catch (credErr) {
+          console.error('[AuthDebug] signInWithCredential failed', {
+            timestamp: new Date().toISOString(),
+            error: credErr instanceof Error ? credErr.message : String(credErr),
+          });
+          setAuthError(formatFirebaseAuthError(credErr));
+        } finally {
+          setAuthLoading(false);
+        }
+      };
+
+      const handleBridgeMessage = (event: MessageEvent) => {
+        if (event.origin !== window.location.origin) return;
+        const payload = event.data as {
+          type?: string;
+          nonce?: string;
+          idToken?: string | null;
+          accessToken?: string | null;
+        } | null;
+        if (payload?.type === 'lz-auth-bridge' && payload.nonce === nonce) {
+          void finishWithTokens(payload.idToken ?? null, payload.accessToken ?? null, 'postMessage');
+        }
+      };
+
+      window.addEventListener('message', handleBridgeMessage);
+      bridgeCleanupRef.current = cleanupBridge;
+
+      bridgePollRef.current = window.setInterval(() => {
+        if (settled) return;
+        if (Date.now() - startedAt > 180_000) {
+          settled = true;
+          cleanupBridge();
+          setAuthError('Google Sign-In timed out. Please click Continue with Google to try again.');
+          setAuthLoading(false);
+          return;
+        }
+
+        void fetch(`/api/auth-bridge/${encodeURIComponent(nonce)}`, { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data: { ready?: boolean; idToken?: string | null; accessToken?: string | null } | null) => {
+            if (data?.ready && !settled) {
+              void finishWithTokens(data.idToken ?? null, data.accessToken ?? null, 'server-poll');
+              return;
+            }
+            if (bridgeWin.closed && !settled && closedGraceTimer === null) {
+              closedGraceTimer = window.setTimeout(() => {
+                if (settled) return;
+                void fetch(`/api/auth-bridge/${encodeURIComponent(nonce)}`, { cache: 'no-store' })
+                  .then((r) => (r.ok ? r.json() : null))
+                  .then((finalData: { ready?: boolean; idToken?: string | null; accessToken?: string | null } | null) => {
+                    if (finalData?.ready && !settled) {
+                      void finishWithTokens(finalData.idToken ?? null, finalData.accessToken ?? null, 'server-final-poll');
+                    } else if (!settled) {
+                      settled = true;
+                      cleanupBridge();
+                      console.warn('[AuthDebug] Bridge window closed before completing sign-in');
+                      setAuthError('Google Sign-In was closed before finishing. Click Continue with Google to try again.');
+                      setAuthLoading(false);
+                    }
+                  })
+                  .catch(() => {
+                    if (!settled) {
+                      settled = true;
+                      cleanupBridge();
+                      setAuthLoading(false);
+                    }
+                  });
+              }, 1200);
+            }
+          })
+          .catch(() => {
+            // Transient poll error; retry on next tick
+          });
+      }, 750);
+
+      return;
+    }
+
     try {
       const cred = await signInWithPopup(auth, googleProvider);
       console.info('[AuthDebug] signInWithPopup resolved', {
@@ -913,25 +1186,7 @@ function LorenzoneApp() {
         host,
         authCurrentUserAfterError: auth.currentUser?.uid ?? null,
       });
-      if (code === 'auth/unauthorized-domain') {
-        setAuthError(
-          `This website address (${host}) is not authorized in Firebase Authentication yet. Open Firebase Console → Authentication → Settings → Authorized domains and add "${host}".`
-        );
-      } else if (code === 'auth/popup-blocked') {
-        setAuthError(
-          'Your browser blocked the Google Sign-In popup. Please allow popups for this site and click Continue with Google again.'
-        );
-      } else if (code === 'auth/popup-closed-by-user') {
-        setAuthError('Google Sign-In was closed before finishing. Click Continue with Google to try again.');
-      } else if (code === 'auth/operation-not-allowed') {
-        setAuthError(
-          'Google Sign-In is disabled in Firebase Console. Enable Google under Authentication → Sign-in method.'
-        );
-      } else if (code === 'auth/network-request-failed') {
-        setAuthError('Network error while connecting to Google Sign-In. Check your internet connection and try again.');
-      } else {
-        setAuthError(err instanceof Error ? err.message : 'Unable to sign in with Google.');
-      }
+      setAuthError(formatFirebaseAuthError(err));
     } finally {
       console.info('[AuthDebug] handleGoogleLogin finished', {
         timestamp: new Date().toISOString(),
@@ -2136,6 +2391,17 @@ function LorenzoneApp() {
     authLoading,
     authError,
   ]);
+
+  if (authBridgeNonce) {
+    return (
+      <AuthBridgeScreen
+        onTriggerSignIn={handleBridgePopupSignIn}
+        loading={bridgeLoading}
+        completed={bridgeCompleted}
+        error={bridgeError}
+      />
+    );
+  }
 
   if (showSplash) {
     return <SplashScreen onFinish={() => setShowSplash(false)} />;
